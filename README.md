@@ -23,7 +23,7 @@ First, make sure you have [Bun](https://bun.sh/) installed.
 Then, to install `lpviz` and its dependencies, run:
 
 ```sh
-git clone https://github.com/lpviz/lpviz  # clone the repo
+git clone https://github.com/lpviz/lpviz    # clone the repo
 cd lpviz                                    # cd into it
 bun install                                 # install frontend dependencies
 ```
