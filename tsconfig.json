@@ -1,24 +1,4 @@
 {
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "noImplicitAny": true,
-    "strictNullChecks": true,
-    "esModuleInterop": true,
-    "skipLibCheck": false,
-    "allowSyntheticDefaultImports": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noImplicitThis": true,
-    "useDefineForClassFields": true,
-    "lib": ["DOM", "DOM.Iterable", "ESNext"],
-    "forceConsistentCasingInFileNames": true,
-    "outDir": "dist-ts"
-  },
-  "include": ["lpviz/src/**/*"]
+  "extends": "./tsconfig.base.json",
+  "include": ["apps/**/*", "packages/**/*", "vite.config.ts"]
 }

@@ -1,0 +1,12 @@
+{
+  "name": "@lpviz/solver-engine",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@lpviz/math": "workspace:*"
+  },
+  "exports": {
+    "./*": "./src/*.ts"
+  }
+}
