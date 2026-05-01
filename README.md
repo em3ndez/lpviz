@@ -1,5 +1,7 @@
 # `lpviz`
 
+[![arXiv](https://img.shields.io/badge/arXiv-2604.27518-b31b1b.svg?style=flat)](https://arxiv.org/abs/2604.27518)
+
 `lpviz` is an interactive web app for visualizing [linear programming](https://youtu.be/kV1ru-Inzl4?si=KgasYrhSbqa_6Orh&t=3153) solvers. Try it now at [https://lpviz.net](https://lpviz.net), or check the installation instructions below to get started running it locally.
 
 <p align="center">
@@ -31,3 +33,17 @@ bun install                                 # install frontend dependencies
 Then, you can run `bun run dev` to start the server.
 
 Note that `lpviz` is a static website - all computations run in the browser.
+
+## Citing `lpviz`
+
+```bibtex
+@misc{lpviz,
+   title={{lpviz: Interactive Linear Programming Visualization}}, 
+   author={Evan Grand and Michael Klamkin},
+   year={2026},
+   eprint={2604.27518},
+   archivePrefix={arXiv},
+   primaryClass={cs.HC},
+   url={https://arxiv.org/abs/2604.27518}, 
+}
+```
