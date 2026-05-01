@@ -106,6 +106,7 @@ export function boot(root: HTMLElement) {
           },
         },
       );
+      canvasManager?.set2DPanEnabled(true);
       polytope.send();
       canvasManager?.draw();
       window.requestAnimationFrame(() => viewport.zoomToFit());
