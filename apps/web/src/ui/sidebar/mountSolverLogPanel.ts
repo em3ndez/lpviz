@@ -36,6 +36,46 @@ function usageTips(): HTMLDivElement {
 export function mountSolverLogPanel(parent: HTMLElement, ctx: AppContext) {
   const frame = el("div", { id: "terminal-container" });
   const result = el("div", { id: "result" });
+  let pointerInsideResult = false;
+  let pointerX = 0;
+  let pointerY = 0;
+  let hoverRafId: number | null = null;
+  let currentHoveredRow: HTMLElement | null = null;
+
+  const setHoveredRow = (next: HTMLElement | null) => {
+    if (currentHoveredRow === next) return;
+    currentHoveredRow?.classList.remove("hover");
+    currentHoveredRow = next;
+    currentHoveredRow?.classList.add("hover");
+    const idx = currentHoveredRow?.dataset.index;
+    ctx.actions.setIterateHighlight(
+      idx !== undefined && idx !== "" ? Number(idx) : null,
+    );
+  };
+  const syncHoverState = () => {
+    hoverRafId = null;
+    if (!pointerInsideResult) {
+      return;
+    }
+    const element = document.elementFromPoint(pointerX, pointerY);
+    const row =
+      element instanceof Element
+        ? element.closest<HTMLElement>(".iterate-item")
+        : null;
+    setHoveredRow(row && result.contains(row) ? row : null);
+  };
+  const scheduleHoverSync = () => {
+    if (!pointerInsideResult || hoverRafId !== null) return;
+    hoverRafId = requestAnimationFrame(syncHoverState);
+  };
+  const clearHoverState = () => {
+    pointerInsideResult = false;
+    setHoveredRow(null);
+    if (hoverRafId !== null) {
+      cancelAnimationFrame(hoverRafId);
+      hoverRafId = null;
+    }
+  };
   frame.append(
     result,
     el("div", { id: "terminal-window" }),
@@ -43,19 +83,23 @@ export function mountSolverLogPanel(parent: HTMLElement, ctx: AppContext) {
     el("div", { className: "scanlines scanlines--delay-12" }),
   );
   parent.append(frame);
-  const onMove = (e: MouseEvent) => {
-    const row = (e.target as Element | null)?.closest<HTMLElement>(
-      ".iterate-item",
-    );
-    const idx = row?.dataset.index;
-    ctx.actions.setIterateHighlight(
-      idx !== undefined && idx !== "" ? Number(idx) : null,
-    );
-  };
-  result.addEventListener("mousemove", onMove);
-  result.addEventListener("mouseleave", () =>
-    ctx.actions.setIterateHighlight(null),
-  );
+  result.addEventListener("pointerenter", (e) => {
+    pointerInsideResult = true;
+    pointerX = e.clientX;
+    pointerY = e.clientY;
+    scheduleHoverSync();
+  });
+  result.addEventListener("pointermove", (e) => {
+    if (!pointerInsideResult) return;
+    pointerX = e.clientX;
+    pointerY = e.clientY;
+    scheduleHoverSync();
+  });
+  result.addEventListener("scroll", scheduleHoverSync, {
+    capture: true,
+    passive: true,
+  });
+  result.addEventListener("pointerleave", clearHoverState);
   function fit(s: State) {
     if (s.resultMaxLineChars > 0) {
       const containerStyle = window.getComputedStyle(result);
@@ -79,6 +123,7 @@ export function mountSolverLogPanel(parent: HTMLElement, ctx: AppContext) {
   function render(s: State) {
     result.className = s.resultDisplayMode === "virtual" ? "virtualized" : "";
     result.replaceChildren();
+    currentHoveredRow = null;
     fit(s);
     if (s.resultDisplayMode === "usage") {
       result.append(usageTips());
@@ -144,6 +189,7 @@ export function mountSolverLogPanel(parent: HTMLElement, ctx: AppContext) {
         }),
       );
     }
+    scheduleHoverSync();
   }
   render(getState());
   const controller = new AbortController();
@@ -163,6 +209,7 @@ export function mountSolverLogPanel(parent: HTMLElement, ctx: AppContext) {
   return {
     destroy: () => {
       controller.abort();
+      clearHoverState();
       frame.remove();
     },
   };
