@@ -40,7 +40,7 @@ export function mountSidebar(parent: HTMLElement, ctx: AppContext) {
       {
         className: "github-link",
         attrs: {
-          href: "https://github.com/klamike/lpviz",
+          href: "https://github.com/lpviz/lpviz",
           target: "_blank",
           rel: "noreferrer",
           "aria-label": "GitHub Repository for lpviz",
