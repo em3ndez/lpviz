@@ -117,10 +117,7 @@ export class IteratePointsLayer implements Layer {
         : 0;
 
       if (colors) {
-        const isLastPoint = i === raw.iteratePath.length - 1;
-        const phase = isLastPoint
-          ? raw.iteratePhases[i]!
-          : raw.iteratePhases[i + 1]!;
+        const phase = raw.iteratePhases[i]!;
         const rgb = PHASE_COLORS_LINEAR[phase % PHASE_COLORS_LINEAR.length]!;
         colors[i * 3] = rgb[0];
         colors[i * 3 + 1] = rgb[1];
