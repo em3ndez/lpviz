@@ -95,15 +95,74 @@ export class ControlsController {
   }
 
   private setup2DListeners(canvas: HTMLCanvasElement): void {
+    let activePointerPanId: number | null = null;
+    let activePinch: {
+      startDistance: number;
+      startScaleFactor: number;
+    } | null = null;
+
+    const startPan = (clientX: number, clientY: number) =>
+      startViewport2DPan(clientX, clientY, canvas.getBoundingClientRect());
+
+    const getTouchCenter = (touches: TouchList) => ({
+      x: (touches[0]!.clientX + touches[1]!.clientX) / 2,
+      y: (touches[0]!.clientY + touches[1]!.clientY) / 2,
+    });
+
+    const getTouchDistance = (touches: TouchList) =>
+      Math.hypot(
+        touches[1]!.clientX - touches[0]!.clientX,
+        touches[1]!.clientY - touches[0]!.clientY,
+      );
+
+    const clearActivePointerPan = () => {
+      if (
+        activePointerPanId !== null &&
+        canvas.hasPointerCapture(activePointerPanId)
+      ) {
+        canvas.releasePointerCapture(activePointerPanId);
+      }
+      activePointerPanId = null;
+    };
+
+    const startPinch = (event: TouchEvent) => {
+      if (event.touches.length !== 2) return false;
+      const startDistance = getTouchDistance(event.touches);
+      if (startDistance <= 0) return false;
+      const config = getViewport2DControlsConfig();
+      if (!config.enabled || config.blocked) return false;
+      activePinch = {
+        startDistance,
+        startScaleFactor: config.state.scaleFactor,
+      };
+      stopViewport2DPan();
+      clearActivePointerPan();
+      canvas.focus();
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return true;
+    };
+
+    const updatePinch = (event: TouchEvent) => {
+      if (!activePinch || event.touches.length !== 2) return false;
+      const distance = getTouchDistance(event.touches);
+      if (distance <= 0) return false;
+      const rect = canvas.getBoundingClientRect();
+      const center = getTouchCenter(event.touches);
+      const handled = zoomViewport2DAtCanvasPoint(
+        { x: center.x - rect.left, y: center.y - rect.top },
+        rect,
+        activePinch.startScaleFactor * (distance / activePinch.startDistance),
+      );
+      if (!handled) return false;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return true;
+    };
+
     const handleMouseDown = (event: MouseEvent) => {
       if (event.button !== 0) return;
-      if (
-        !startViewport2DPan(
-          event.clientX,
-          event.clientY,
-          canvas.getBoundingClientRect(),
-        )
-      ) {
+      if (!startPan(event.clientX, event.clientY)) {
         return;
       }
       canvas.focus();
@@ -119,23 +178,41 @@ export class ControlsController {
       if (!stopViewport2DPan()) return;
       event.preventDefault();
     };
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.pointerType === "mouse" || !event.isPrimary) return;
+      if (event.button !== 0 || !startPan(event.clientX, event.clientY)) {
+        return;
+      }
+      activePointerPanId = event.pointerId;
+      canvas.setPointerCapture(event.pointerId);
+      canvas.focus();
+      event.preventDefault();
+    };
+    const handlePointerMove = (event: PointerEvent) => {
+      if (activePointerPanId !== event.pointerId || !isViewport2DPanActive()) {
+        return;
+      }
+      updateViewport2DPan(event.clientX, event.clientY);
+      event.preventDefault();
+    };
+    const handlePointerUp = (event: PointerEvent) => {
+      if (activePointerPanId !== event.pointerId) return;
+      clearActivePointerPan();
+      if (!stopViewport2DPan()) return;
+      event.preventDefault();
+    };
     const handleTouchStart = (event: TouchEvent) => {
+      if (startPinch(event)) return;
       if (event.touches.length !== 1) return;
       const touch = event.touches[0];
-      if (
-        !touch ||
-        !startViewport2DPan(
-          touch.clientX,
-          touch.clientY,
-          canvas.getBoundingClientRect(),
-        )
-      ) {
+      if (!touch || !startPan(touch.clientX, touch.clientY)) {
         return;
       }
       canvas.focus();
       event.preventDefault();
     };
     const handleTouchMove = (event: TouchEvent) => {
+      if (updatePinch(event)) return;
       if (event.touches.length !== 1) return;
       const touch = event.touches[0];
       if (!touch || !isViewport2DPanActive()) return;
@@ -143,11 +220,17 @@ export class ControlsController {
       event.preventDefault();
     };
     const handleTouchEnd = (event: TouchEvent) => {
+      if (activePinch && event.touches.length < 2) {
+        activePinch = null;
+        event.preventDefault();
+        return;
+      }
       if (!isViewport2DPanActive()) return;
       if (!stopViewport2DPan()) return;
       event.preventDefault();
     };
     const handleTouchCancel = (event: TouchEvent) => {
+      activePinch = null;
       if (!isViewport2DPanActive()) return;
       if (!stopViewport2DPan()) return;
       event.preventDefault();
@@ -176,6 +259,10 @@ export class ControlsController {
     };
 
     canvas.addEventListener("mousedown", handleMouseDown);
+    canvas.addEventListener("pointerdown", handlePointerDown);
+    canvas.addEventListener("pointermove", handlePointerMove);
+    canvas.addEventListener("pointerup", handlePointerUp);
+    canvas.addEventListener("pointercancel", handlePointerUp);
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleMouseUp);
     canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
@@ -188,6 +275,10 @@ export class ControlsController {
 
     this.cleanup2D = () => {
       canvas.removeEventListener("mousedown", handleMouseDown);
+      canvas.removeEventListener("pointerdown", handlePointerDown);
+      canvas.removeEventListener("pointermove", handlePointerMove);
+      canvas.removeEventListener("pointerup", handlePointerUp);
+      canvas.removeEventListener("pointercancel", handlePointerUp);
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
       canvas.removeEventListener("touchstart", handleTouchStart);
@@ -195,6 +286,8 @@ export class ControlsController {
       window.removeEventListener("touchend", handleTouchEnd);
       window.removeEventListener("touchcancel", handleTouchCancel);
       canvas.removeEventListener("wheel", handleWheel);
+      clearActivePointerPan();
+      activePinch = null;
     };
   }
 
@@ -247,6 +340,10 @@ export class ControlsController {
     const panBasisUp = new Vector3();
     const moveDelta = new Vector3();
     const moveTarget = new Vector3();
+    let active3DPointerId: number | null = null;
+    let activeTwoFingerOrbit = false;
+    let activeTwoFingerStartDistance = 0;
+    let activeTwoFingerStartCameraDistance = MIN_DISTANCE;
 
     const getOrbitState = () => {
       const offset = orbitOffset.subVectors(
@@ -315,15 +412,18 @@ export class ControlsController {
       emitPose(target);
     };
 
-    const handlePointerDown = (event: MouseEvent) => {
+    const start3DDrag = (
+      kind: Active3DDrag["kind"],
+      clientX: number,
+      clientY: number,
+    ) => {
       if (!canUse3DControls()) return;
-      if (event.button !== 0 && event.button !== 2) return;
       const orbit = getOrbitState();
       const panBasis = getPanBasis(orbit.distance);
       this.active3DDrag = {
-        kind: event.button === 0 ? "pan" : "rotate",
-        startClientX: event.clientX,
-        startClientY: event.clientY,
+        kind,
+        startClientX: clientX,
+        startClientY: clientY,
         startTarget: this.controlsTarget.clone(),
         startPosition: perspectiveCamera.position.clone(),
         startDistance: orbit.distance,
@@ -334,9 +434,71 @@ export class ControlsController {
         unitsPerPixel: panBasis.unitsPerPixel,
       };
       canvas.focus();
+      this.controlsConfig.onStart?.();
+    };
+
+    const getTouchCenter = (touches: TouchList) => ({
+      x: (touches[0]!.clientX + touches[1]!.clientX) / 2,
+      y: (touches[0]!.clientY + touches[1]!.clientY) / 2,
+    });
+
+    const getTouchDistance = (touches: TouchList) =>
+      Math.hypot(
+        touches[1]!.clientX - touches[0]!.clientX,
+        touches[1]!.clientY - touches[0]!.clientY,
+      );
+
+    const apply3DZoomDistance = (nextDistance: number) => {
+      if (!canUse3DControls()) return;
+      const offset = new Vector3().subVectors(
+        perspectiveCamera.position,
+        this.controlsTarget,
+      );
+      if (offset.lengthSq() <= 1e-8) return;
+      perspectiveCamera.position
+        .copy(this.controlsTarget)
+        .add(
+          offset
+            .normalize()
+            .multiplyScalar(
+              Math.min(
+                this.controlsMaxDistance,
+                Math.max(MIN_DISTANCE, nextDistance),
+              ),
+            ),
+        );
+      emitPose();
+    };
+
+    const stop3DDrag = () => {
+      if (!this.active3DDrag) return false;
+      this.active3DDrag = null;
+      activeTwoFingerOrbit = false;
+      activeTwoFingerStartDistance = 0;
+      this.controlsConfig.onEnd?.();
+      return true;
+    };
+
+    const clearActive3DPointer = () => {
+      if (
+        active3DPointerId !== null &&
+        canvas.hasPointerCapture(active3DPointerId)
+      ) {
+        canvas.releasePointerCapture(active3DPointerId);
+      }
+      active3DPointerId = null;
+    };
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (event.button !== 0 && event.button !== 2) return;
+      start3DDrag(
+        event.button === 0 ? "pan" : "rotate",
+        event.clientX,
+        event.clientY,
+      );
+      if (!this.active3DDrag) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      this.controlsConfig.onStart?.();
     };
 
     const handlePointerMove = (event: MouseEvent) => {
@@ -347,7 +509,71 @@ export class ControlsController {
     };
 
     const handlePointerUp = (event: MouseEvent) => {
+      if (!stop3DDrag()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    const handleTouchStart3D = (event: TouchEvent) => {
+      if (event.touches.length !== 2) return;
+      clearActive3DPointer();
+      activeTwoFingerStartDistance = getTouchDistance(event.touches);
+      if (activeTwoFingerStartDistance <= 0) return;
+      activeTwoFingerStartCameraDistance = getOrbitState().distance;
+      const center = getTouchCenter(event.touches);
+      start3DDrag("rotate", center.x, center.y);
       if (!this.active3DDrag) return;
+      activeTwoFingerOrbit = true;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    const handleTouchMove3D = (event: TouchEvent) => {
+      if (!activeTwoFingerOrbit || event.touches.length !== 2) return;
+      const center = getTouchCenter(event.touches);
+      apply3DMove(center.x, center.y);
+      const distance = getTouchDistance(event.touches);
+      if (distance > 0 && activeTwoFingerStartDistance > 0) {
+        apply3DZoomDistance(
+          activeTwoFingerStartCameraDistance *
+            (activeTwoFingerStartDistance / distance),
+        );
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    const handleTouchEnd3D = (event: TouchEvent) => {
+      if (!activeTwoFingerOrbit || event.touches.length >= 2) return;
+      if (!stop3DDrag()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    const handleTouchPointerDown = (event: PointerEvent) => {
+      if (activeTwoFingerOrbit) return;
+      if (event.pointerType === "mouse" || !event.isPrimary) return;
+      if (event.button !== 0) return;
+      start3DDrag("pan", event.clientX, event.clientY);
+      if (!this.active3DDrag) return;
+      active3DPointerId = event.pointerId;
+      canvas.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    const handleTouchPointerMove = (event: PointerEvent) => {
+      if (activeTwoFingerOrbit) return;
+      if (active3DPointerId !== event.pointerId || !this.active3DDrag) return;
+      apply3DMove(event.clientX, event.clientY);
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    const handleTouchPointerUp = (event: PointerEvent) => {
+      if (activeTwoFingerOrbit) return;
+      if (active3DPointerId !== event.pointerId || !this.active3DDrag) return;
+      clearActive3DPointer();
       this.active3DDrag = null;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -442,6 +668,20 @@ export class ControlsController {
     };
 
     canvas.addEventListener("mousedown", handlePointerDown);
+    canvas.addEventListener("pointerdown", handleTouchPointerDown);
+    canvas.addEventListener("pointermove", handleTouchPointerMove);
+    canvas.addEventListener("pointerup", handleTouchPointerUp);
+    canvas.addEventListener("pointercancel", handleTouchPointerUp);
+    canvas.addEventListener("touchstart", handleTouchStart3D, {
+      passive: false,
+    });
+    window.addEventListener("touchmove", handleTouchMove3D, {
+      passive: false,
+    });
+    window.addEventListener("touchend", handleTouchEnd3D, { passive: false });
+    window.addEventListener("touchcancel", handleTouchEnd3D, {
+      passive: false,
+    });
     window.addEventListener("mousemove", handlePointerMove);
     window.addEventListener("mouseup", handlePointerUp);
     canvas.addEventListener("wheel", handleWheel3D, { passive: false });
@@ -449,11 +689,22 @@ export class ControlsController {
 
     this.cleanup3D = () => {
       canvas.removeEventListener("mousedown", handlePointerDown);
+      canvas.removeEventListener("pointerdown", handleTouchPointerDown);
+      canvas.removeEventListener("pointermove", handleTouchPointerMove);
+      canvas.removeEventListener("pointerup", handleTouchPointerUp);
+      canvas.removeEventListener("pointercancel", handleTouchPointerUp);
+      canvas.removeEventListener("touchstart", handleTouchStart3D);
+      window.removeEventListener("touchmove", handleTouchMove3D);
+      window.removeEventListener("touchend", handleTouchEnd3D);
+      window.removeEventListener("touchcancel", handleTouchEnd3D);
       window.removeEventListener("mousemove", handlePointerMove);
       window.removeEventListener("mouseup", handlePointerUp);
       canvas.removeEventListener("wheel", handleWheel3D);
       canvas.removeEventListener("contextmenu", handleContextMenu);
       this.active3DDrag = null;
+      clearActive3DPointer();
+      activeTwoFingerOrbit = false;
+      activeTwoFingerStartDistance = 0;
     };
   }
 

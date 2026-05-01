@@ -9,7 +9,7 @@ import { el } from "@/ui/dom";
 export function mountCanvasStage(
   parent: HTMLElement,
   ctx: AppContext,
-  onResizeStart: () => void,
+  onResizeStart: (event: PointerEvent) => void,
 ) {
   const main = el("main", { className: "canvas-stage" });
   const viewport = el("div", { className: "canvas-stage__viewport" });
@@ -29,7 +29,9 @@ export function mountCanvasStage(
             sendPolytope: ctx.services.polytope.send,
             handleUndoRedo: ctx.services.history.handleUndoRedo,
           });
-          ctx.services.viewport.syncViewportLayout(ctx.getSidebarWidth());
+          ctx.services.viewport.syncViewportLayout(
+            ctx.getViewportSidebarWidth(),
+          );
           runtime.draw();
         })
         .catch((e) => console.error("Failed to initialize viewport", e));
@@ -82,9 +84,11 @@ export function mountCanvasStage(
   zoom.append(reset, fit, toggle3d, share, zc);
   main.append(zoom);
   const handle = el("div", { id: "sidebarHandle" });
-  handle.addEventListener("mousedown", (e) => {
+  handle.addEventListener("pointerdown", (e) => {
+    if (!e.isPrimary || e.button !== 0) return;
     e.preventDefault();
-    onResizeStart();
+    handle.setPointerCapture(e.pointerId);
+    onResizeStart(e);
   });
   main.append(handle);
   function render() {
@@ -95,7 +99,7 @@ export function mountCanvasStage(
     zv.textContent = zScale.toFixed(2);
     zc.className = is3DMode ? "" : "is-hidden";
     const sw = ctx.getSidebarWidth();
-    handle.style.left = `${sw}px`;
+    handle.style.left = ctx.isMobileLayout() ? "0" : `${sw}px`;
     gallery.update();
   }
   render();
