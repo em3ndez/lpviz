@@ -37,13 +37,10 @@ Note that `lpviz` is a static website - all computations run in the browser.
 ## Citing `lpviz`
 
 ```bibtex
-@misc{lpviz,
-   title={{lpviz: Interactive Linear Programming Visualization}}, 
-   author={Evan Grand and Michael Klamkin},
-   year={2026},
-   eprint={2604.27518},
-   archivePrefix={arXiv},
-   primaryClass={cs.HC},
-   url={https://arxiv.org/abs/2604.27518}, 
+@article{lpviz,
+  title={{lpviz: Interactive Linear Programming Visualization}},
+  author={Grand, Evan and Klamkin, Michael},
+  journal={arXiv preprint arXiv:2604.27518},
+  year={2026}
 }
 ```
