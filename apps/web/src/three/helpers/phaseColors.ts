@@ -1,6 +1,6 @@
 import { Color } from "three";
 
-export const PHASE_COLORS = [
+const PHASE_COLORS = [
   "#377eb8",
   "#800080",
   "#4daf4a",
@@ -19,3 +19,11 @@ export const PHASE_COLORS_LINEAR: ReadonlyArray<
   const c = new Color(hex);
   return [c.r, c.g, c.b] as const;
 });
+
+// linear working-space bytes for per-point color textures (see pathRibbon.ts)
+export const PHASE_COLORS_BYTES: ReadonlyArray<
+  readonly [number, number, number]
+> = PHASE_COLORS_LINEAR.map(
+  ([r, g, b]) =>
+    [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)] as const,
+);

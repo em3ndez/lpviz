@@ -1,5 +1,13 @@
 import type { ResultTextBlock } from "@/features/solver/types";
-import type { Line, PointXY, PointXYZ, VecNs } from "@lpviz/math/types";
+
+// Result rows materialize (format) lazily on access so a 100k-iteration solve
+// doesn't pay for formatting rows that are never scrolled into view. Plain
+// arrays satisfy this shape, which keeps empty-state assignments simple.
+type VirtualRowBlocks = {
+  length: number;
+  at(index: number): ResultTextBlock | undefined;
+};
+import type { Line, PointXY, PointXYZ } from "@lpviz/math/types";
 import type { PolytopeRepresentation } from "@lpviz/polytope/polytopeTypes";
 import { DEFAULT_VIEW_ANGLE, DEFAULT_Z_SCALE } from "@lpviz/viewport/defaults";
 
@@ -47,8 +55,25 @@ export type EditorInteractionState =
     }
   | { kind: "dragging"; target: DragTarget };
 
-interface TraceEntry {
-  path: Float64Array[];
+// Flat, contiguous iterate data: element `i` lives at [i*stride .. i*stride+stride).
+// stride 3 = [x, y, bakedTotalZ] (packed pdhg/ipm), stride 2 = [x, y] (simplex /
+// central path, z renders flat). One array per solve instead of one Float64Array
+// view per iterate keeps the iterate path and trace ring at a few dozen live
+// objects rather than millions — which is what a (SpiderMonkey) major GC must
+// mark, and was the source of the mid-rotation frame drops at high maxit.
+export interface IteratePath {
+  points: Float64Array;
+  count: number;
+  stride: number;
+}
+
+const EMPTY_ITERATE_PATH: IteratePath = {
+  points: new Float64Array(0),
+  count: 0,
+  stride: 3,
+};
+
+interface TraceEntry extends IteratePath {
   objectiveVector: PointXY | null;
 }
 
@@ -61,9 +86,80 @@ export type ViewportDirtyFlags = Partial<{
   iterate: boolean;
 }>;
 
+// Repaint everything — for whole-problem swaps (gallery load, shared-state
+// import) and mode switches where deriving per-field flags would be noise.
+export const ALL_VIEWPORT_DIRTY: ViewportDirtyFlags = {
+  grid: true,
+  polytope: true,
+  constraints: true,
+  objective: true,
+  trace: true,
+  iterate: true,
+};
+
 type StateChangeMeta = {
   viewportDirty?: ViewportDirtyFlags;
 };
+
+// Which render layers a change to each store field repaints. patch() derives
+// `viewportDirty` from the changed fields automatically, so callers no longer
+// hand-pick flags (the scattered reverse-index of layer invalidationKeys that
+// was the main source of silent missed-repaint bugs). Derivation is additive —
+// it is unioned with any explicitly-passed flags and can only add, never drop —
+// and fields absent here (pure UI/solver-config state) repaint nothing.
+const POLYTOPE_DIRTY: ViewportDirtyFlags = {
+  polytope: true,
+  constraints: true,
+  objective: true,
+};
+const ITERATE_DIRTY: ViewportDirtyFlags = { iterate: true };
+const TRACE_DIRTY: ViewportDirtyFlags = { trace: true };
+// the objective marker is occluded by the polytope floor in 3D, so a moved
+// objective repaints the polytope too while in (or transitioning to) 3D
+const objectiveDirty = (s: State): ViewportDirtyFlags =>
+  s.is3DMode || s.isTransitioning3D
+    ? { polytope: true, objective: true }
+    : { objective: true };
+
+const FIELD_DIRTY: Partial<Record<keyof State, (s: State) => ViewportDirtyFlags>> =
+  {
+    vertices: () => POLYTOPE_DIRTY,
+    polytope: () => POLYTOPE_DIRTY,
+    completionMode: () => POLYTOPE_DIRTY,
+    interiorPoint: () => POLYTOPE_DIRTY,
+    objectiveVector: objectiveDirty,
+    currentObjective: objectiveDirty,
+    objectiveHidden: () => ({ objective: true }),
+    highlightIndex: () => ({ constraints: true }),
+    iteratePath: () => ITERATE_DIRTY,
+    iteratePhases: () => ITERATE_DIRTY,
+    iterateRestartIndices: () => ITERATE_DIRTY,
+    iterateObjectiveVector: () => ITERATE_DIRTY,
+    highlightIteratePathIndex: () => ITERATE_DIRTY,
+    traceBuffer: () => TRACE_DIRTY,
+    traceEnabled: () => TRACE_DIRTY,
+    // zScale rescales every world-anchored layer's height
+    zScale: () => ({
+      polytope: true,
+      objective: true,
+      trace: true,
+      iterate: true,
+    }),
+  };
+
+export function deriveViewportDirty(
+  state: State,
+  changedKeys: readonly (keyof State)[],
+): ViewportDirtyFlags | null {
+  let flags: ViewportDirtyFlags | null = null;
+  for (const key of changedKeys) {
+    const derive = FIELD_DIRTY[key];
+    if (!derive) continue;
+    // build a fresh object (never mutate the shared flag constants)
+    flags = Object.assign(flags ?? {}, derive(state));
+  }
+  return flags;
+}
 
 export type SolverSettings = {
   alphaMax: number;
@@ -110,7 +206,7 @@ export type State = {
   resultVirtualHeader: string | null;
   resultVirtualFooter: string | null;
   resultVirtualShowEmpty: boolean;
-  resultVirtualRows: ResultTextBlock[];
+  resultVirtualRows: VirtualRowBlocks;
   resultMaxLineChars: number;
 
   objectiveVector: PointXY | null;
@@ -119,15 +215,14 @@ export type State = {
 
   solverMode: SolverMode;
   solverSettings: SolverSettings;
-  iteratePath: VecNs;
+  iteratePath: IteratePath;
   iteratePhases: number[];
   highlightIteratePathIndex: number | null;
   rotateObjectiveMode: boolean;
   animationIntervalId: number | null;
-  originalIteratePath: VecNs;
+  originalIteratePath: IteratePath;
   originalIteratePhases: number[];
   iterateRestartIndices: number[];
-  originalIterateRestartIndices: number[];
   iterateObjectiveVector: PointXY | null;
   originalIterateObjectiveVector: PointXY | null;
 
@@ -175,15 +270,14 @@ const initialState: State = {
 
   solverMode: "central",
   solverSettings: { ...DEFAULT_SOLVER_SETTINGS },
-  iteratePath: [],
+  iteratePath: EMPTY_ITERATE_PATH,
   iteratePhases: [],
   highlightIteratePathIndex: null,
   rotateObjectiveMode: false,
   animationIntervalId: null,
-  originalIteratePath: [],
+  originalIteratePath: EMPTY_ITERATE_PATH,
   originalIteratePhases: [],
   iterateRestartIndices: [],
-  originalIterateRestartIndices: [],
   iterateObjectiveVector: null,
   originalIterateObjectiveVector: null,
 
@@ -226,7 +320,7 @@ class LpvizStore {
     this.values = initialValues;
   }
 
-  getState(): State {
+  getState(): Readonly<State> {
     return this.values;
   }
 
@@ -248,9 +342,6 @@ class LpvizStore {
       changedKeys.push(key);
     }
 
-    const hasMeta = meta !== undefined;
-    if (!nextValues && !hasMeta) return;
-
     if (nextValues) {
       this.values = nextValues;
       for (const key of changedKeys) {
@@ -261,10 +352,21 @@ class LpvizStore {
       this.flush();
     }
 
-    if (hasMeta) {
-      const listeners = this.metaListeners.slice();
-      for (let i = 0; i < listeners.length; i++) listeners[i]!(meta);
+    // viewportDirty is the union of what the changed fields imply and anything
+    // the caller passed explicitly (see FIELD_DIRTY)
+    const derived = nextValues
+      ? deriveViewportDirty(this.values, changedKeys)
+      : null;
+    if (meta === undefined && derived === null) return;
+    let merged: StateChangeMeta = meta ?? {};
+    if (derived !== null) {
+      merged = {
+        ...merged,
+        viewportDirty: { ...merged.viewportDirty, ...derived },
+      };
     }
+    const listeners = this.metaListeners.slice();
+    for (let i = 0; i < listeners.length; i++) listeners[i]!(merged);
   }
 
   on<K extends keyof State>(
@@ -332,7 +434,7 @@ class LpvizStore {
 
 const lpvizStore = new LpvizStore(initialState);
 
-export function getState(): State {
+export function getState(): Readonly<State> {
   return lpvizStore.getState();
 }
 
@@ -387,55 +489,54 @@ export function prepareAnimationInterval(): void {
 }
 
 export function updateIteratePaths(
-  iteratesArray: Float64Array[],
+  path: IteratePath,
   phasesArray?: number[],
   restartIndicesArray?: number[],
 ): void {
   const { objectiveVector } = getState();
+  // viewportDirty derived from the changed iterate fields (see FIELD_DIRTY)
   setState(
     buildIterateStatePatch(
-      iteratesArray,
+      path,
       phasesArray,
       restartIndicesArray,
       snapshotObjectiveVector(objectiveVector),
     ),
-    { viewportDirty: { iterate: true } },
   );
 }
 
 export function clearIterateState(): void {
-  setState(
-    {
-      ...buildIterateStatePatch([], undefined, undefined, null),
-      highlightIteratePathIndex: null,
-    },
-    { viewportDirty: { iterate: true } },
-  );
+  setState({
+    ...buildIterateStatePatch(EMPTY_ITERATE_PATH, undefined, undefined, null),
+    highlightIteratePathIndex: null,
+  });
 }
 
-export function addTraceToBuffer(iteratesArray: Float64Array[]): void {
+export function addTraceToBuffer(path: IteratePath): void {
   const state = getState();
-  if (!state.traceEnabled || iteratesArray.length === 0) return;
-  setState(
-    {
-      traceBuffer: appendedTraceBuffer(
-        state,
-        iteratesArray,
-        snapshotObjectiveVector(state.objectiveVector),
-      ),
-    },
-    { viewportDirty: { trace: true } },
-  );
+  if (!state.traceEnabled || path.count === 0) return;
+  setState({
+    traceBuffer: appendedTraceBuffer(
+      state,
+      path,
+      snapshotObjectiveVector(state.objectiveVector),
+    ),
+  });
 }
 
-export function computeIterateZ(
-  entry: Float64Array,
+// Display z for one iterate at points[base..base+stride): the baked total
+// (component [2], present for pdhg/ipm) minus the current objective value, so
+// 2D-projected solves render flat and the 3D height tracks the extra term.
+export function computeFlatZ(
+  points: Float64Array,
+  base: number,
+  stride: number,
   objectiveVector: PointXY | null,
 ): number {
   const objectiveValue = objectiveVector
-    ? objectiveVector.x * entry[0]! + objectiveVector.y * entry[1]!
+    ? objectiveVector.x * points[base]! + objectiveVector.y * points[base + 1]!
     : 0;
-  const totalValue = entry[2] !== undefined ? entry[2]! : objectiveValue;
+  const totalValue = stride >= 3 ? points[base + 2]! : objectiveValue;
   return totalValue - objectiveValue;
 }
 
@@ -446,62 +547,62 @@ export function getDisplayedIterateZ(
   const { objectiveVector: currentObjective } = getState();
   const objectiveVector =
     objectiveOverride === undefined ? currentObjective : objectiveOverride;
-  return computeIterateZ(entry, objectiveVector);
+  return computeFlatZ(entry, 0, entry.length, objectiveVector);
 }
 
 export function updateIteratePathsWithTrace(
-  iteratesArray: Float64Array[],
+  path: IteratePath,
   phasesArray?: number[],
   restartIndicesArray?: number[],
 ): void {
   const state = getState();
   const objectiveSnapshot = snapshotObjectiveVector(state.objectiveVector);
   const patch: Partial<State> = buildIterateStatePatch(
-    iteratesArray,
+    path,
     phasesArray,
     restartIndicesArray,
     objectiveSnapshot,
   );
-  if (state.traceEnabled && iteratesArray.length > 0) {
-    patch.traceBuffer = appendedTraceBuffer(
-      state,
-      iteratesArray,
-      objectiveSnapshot,
-    );
+  if (state.traceEnabled && path.count > 0) {
+    patch.traceBuffer = appendedTraceBuffer(state, path, objectiveSnapshot);
   }
-  setState(patch, {
-    viewportDirty: {
-      iterate: true,
-      ...(state.traceEnabled && iteratesArray.length > 0
-        ? { trace: true }
-        : {}),
-    },
-  });
+  // iterate (+ trace, if a chunk was appended) derived from the patched fields
+  setState(patch);
 }
 
 function snapshotObjectiveVector(objectiveVector: PointXY | null) {
   return objectiveVector ? { ...objectiveVector } : null;
 }
-
-function copyIteratePath(iteratesArray: Float64Array[]) {
-  return iteratesArray.map((entry) => entry.slice());
-}
-
-function copyIteratePhases(phasesArray?: number[]) {
-  return phasesArray ? [...phasesArray] : [];
-}
-
-function copyRestartIndices(restartIndicesArray?: number[]) {
-  return restartIndicesArray ? [...restartIndicesArray] : [];
+// Collapse a solver's per-iterate Float64Arrays into one flat IteratePath
+// (simplex / central path, whose iterates live in independent buffers). Packed
+// pdhg/ipm results never come through here — they arrive already flat from the
+// worker (see unpackIteratePath).
+export function flattenIteratesToPath(
+  iteratesArray: Float64Array[],
+): IteratePath {
+  const count = iteratesArray.length;
+  if (count === 0) return EMPTY_ITERATE_PATH;
+  const stride = iteratesArray[0]!.length >= 3 ? 3 : 2;
+  const points = new Float64Array(count * stride);
+  for (let i = 0; i < count; i++) {
+    const it = iteratesArray[i]!;
+    points[i * stride] = it[0] ?? 0;
+    points[i * stride + 1] = it[1] ?? 0;
+    if (stride >= 3) points[i * stride + 2] = it[2] ?? 0;
+  }
+  return { points, count, stride };
 }
 
 function appendedTraceBuffer(
   state: State,
-  iteratesArray: Float64Array[],
+  path: IteratePath,
   objectiveSnapshot: PointXY | null,
 ): TraceEntry[] {
+  // The trace chunk shares the iterate path's flat buffer (one object, no copy).
   const entry: TraceEntry = {
-    path: copyIteratePath(iteratesArray),
+    points: path.points,
+    count: path.count,
+    stride: path.stride,
     objectiveVector: snapshotObjectiveVector(objectiveSnapshot),
   };
   const raw = [...state.traceBuffer, entry];
@@ -511,18 +612,20 @@ function appendedTraceBuffer(
 }
 
 function buildIterateStatePatch(
-  iteratesArray: Float64Array[],
+  path: IteratePath,
   phasesArray: number[] | undefined,
   restartIndicesArray: number[] | undefined,
   objectiveSnapshot: PointXY | null,
 ): Partial<State> {
+  // The flat path and phase/restart arrays are never mutated after creation
+  // (replay grows a fresh IteratePath over the same shared buffer), so the
+  // "original" fields can share them instead of deep-copying.
   return {
-    originalIteratePath: copyIteratePath(iteratesArray),
-    iteratePath: iteratesArray,
+    originalIteratePath: path,
+    iteratePath: path,
     iteratePhases: phasesArray ?? [],
-    originalIteratePhases: copyIteratePhases(phasesArray),
+    originalIteratePhases: phasesArray ?? [],
     iterateRestartIndices: restartIndicesArray ?? [],
-    originalIterateRestartIndices: copyRestartIndices(restartIndicesArray),
     iterateObjectiveVector: objectiveSnapshot,
     originalIterateObjectiveVector: snapshotObjectiveVector(objectiveSnapshot),
   };
@@ -530,19 +633,18 @@ function buildIterateStatePatch(
 
 export function resetTraceState(): void {
   if (getState().traceBuffer.length === 0) return;
-  setState({ traceBuffer: [] }, { viewportDirty: { trace: true } });
+  setState({ traceBuffer: [] });
 }
 
 export function setTraceCapacity(maxTraceCount: number): void {
   const { traceBuffer } = getState();
-  setState(
-    {
-      maxTraceCount,
-      traceBuffer:
-        traceBuffer.length > maxTraceCount
-          ? traceBuffer.slice(traceBuffer.length - maxTraceCount)
-          : traceBuffer,
-    },
-    { viewportDirty: { trace: true } },
-  );
+  // a repaint is derived only when traceBuffer actually changes (eviction);
+  // a capacity-only bump draws the same chunks
+  setState({
+    maxTraceCount,
+    traceBuffer:
+      traceBuffer.length > maxTraceCount
+        ? traceBuffer.slice(traceBuffer.length - maxTraceCount)
+        : traceBuffer,
+  });
 }

@@ -3,7 +3,9 @@ import { centralPath } from "@lpviz/solver-engine/centralPath";
 import { ipm } from "@lpviz/solver-engine/ipm";
 import { pdhg } from "@lpviz/solver-engine/pdhg";
 import { simplex } from "@lpviz/solver-engine/simplex";
+import { packSolverResponse } from "./resultPacking";
 
+import type { IteratePath } from "@/features/core/store";
 import type {
   CentralPathResult,
   IPMResult,
@@ -47,31 +49,18 @@ export type SolverWorkerPayload =
 
 type SolverWorkerRequest = SolverWorkerPayload & { id: number };
 
-export type SolverWorkerSuccessResponse =
-  | {
-      id: number;
-      solver: "ipm";
-      success: true;
-      result: IPMResult;
-    }
-  | {
-      id: number;
-      solver: "simplex";
-      success: true;
-      result: SimplexResult;
-    }
-  | {
-      id: number;
-      solver: "pdhg";
-      success: true;
-      result: PDHGResult;
-    }
-  | {
-      id: number;
-      solver: "central";
-      success: true;
-      result: CentralPathResult;
-    };
+// `I` is the iterates representation for pdhg/ipm: the worker emits one
+// Float64Array per iterate (SolverEngineSuccessResponse), then packs/transfers
+// so the client receives one flat IteratePath (SolverWorkerSuccessResponse).
+// simplex/central are small and pass through unchanged.
+type SolverSuccessResponse<I> =
+  | { id: number; solver: "ipm"; success: true; result: IPMResult<I> }
+  | { id: number; solver: "simplex"; success: true; result: SimplexResult }
+  | { id: number; solver: "pdhg"; success: true; result: PDHGResult<I> }
+  | { id: number; solver: "central"; success: true; result: CentralPathResult };
+
+export type SolverEngineSuccessResponse = SolverSuccessResponse<Float64Array[]>;
+export type SolverWorkerSuccessResponse = SolverSuccessResponse<IteratePath>;
 
 type SolverWorkerErrorResponse = {
   id: number;
@@ -175,7 +164,7 @@ const ctx = self as unknown as Worker;
 
 async function executeSolver(
   data: SolverWorkerRequest,
-): Promise<SolverWorkerSuccessResponse> {
+): Promise<SolverEngineSuccessResponse> {
   const { id } = data;
   if (data.solver === "ipm") {
     return {
@@ -240,7 +229,11 @@ ctx.addEventListener(
     if (!data) return;
 
     try {
-      ctx.postMessage(await executeSolver(data));
+      const { wire, transfer } = packSolverResponse(
+        await executeSolver(data),
+        data,
+      );
+      ctx.postMessage(wire, transfer);
     } catch (error) {
       ctx.postMessage({
         id: data.id,

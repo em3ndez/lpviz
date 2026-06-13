@@ -1,3 +1,7 @@
+import {
+  unpackSolverResponse,
+  type PackedSolverWorkerResponse,
+} from "./resultPacking";
 import type {
   SolverWorkerPayload,
   SolverWorkerResponse,
@@ -24,21 +28,31 @@ let nextRequestId = 0;
 
 worker.addEventListener(
   "message",
-  (event: MessageEvent<SolverWorkerResponse>) => {
+  (event: MessageEvent<PackedSolverWorkerResponse>) => {
     const entry = pending.get(event.data.id);
     if (!entry) return;
     pending.delete(event.data.id);
     scheduleDispatch();
-    entry.resolve(event.data);
+    entry.resolve(unpackSolverResponse(event.data));
   },
 );
 
-worker.addEventListener("error", (event) => {
-  const reason = event.error ?? event.message ?? event;
+function rejectAll(reason: unknown) {
   pending.forEach(({ reject }) => reject(reason));
   pending.clear();
   requestQueue.forEach(({ reject }) => reject(reason));
   requestQueue.length = 0;
+}
+
+worker.addEventListener("error", (event) => {
+  rejectAll(event.error ?? event.message ?? event);
+});
+
+// A reply that fails structured deserialization would otherwise leave its
+// pending entry stranded forever; once pending fills up, dispatch stops and
+// all solving is dead until reload.
+worker.addEventListener("messageerror", () => {
+  rejectAll(new Error("Solver worker reply could not be deserialized"));
 });
 
 function scheduleDispatch() {

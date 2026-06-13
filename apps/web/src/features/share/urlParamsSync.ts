@@ -1,4 +1,9 @@
-import { getState, setState, type SolverMode } from "@/features/core/store";
+import {
+  ALL_VIEWPORT_DIRTY,
+  getState,
+  setState,
+  type SolverMode,
+} from "@/features/core/store";
 import {
   buildSharedStatePatch,
   expandSharedAppState,
@@ -46,30 +51,27 @@ export function applyUrlParamsOnce({
         inequalitiesMessage: null,
         highlightIndex: null,
       },
-      {
-        viewportDirty: {
-          grid: true,
-          polytope: true,
-          constraints: true,
-          objective: true,
-          trace: true,
-          iterate: true,
-        },
-      },
+      { viewportDirty: ALL_VIEWPORT_DIRTY },
     );
     applySharedSettings(sharedState.settings);
     const state = getState();
     const regionFinished = state.completionMode !== "draft";
     setActiveSolverMode(state.solverMode);
     if (regionFinished) sendPolytope();
+    if (sharedState.is3DMode === true && !state.is3DMode) {
+      canvasManager.start3DTransition(true);
+    }
     canvasManager.draw();
   };
   if (!params.has("s")) return;
   try {
-    const crushed = decodeURIComponent(params.get("s") ?? "");
+    const crushed = params.get("s") ?? "";
     const data = JSON.parse(JSONCrush.uncrush(crushed));
     if (data) applySharedState(expandSharedAppState(data) as SharedAppState);
-    history.replaceState(null, "", window.location.pathname);
+    // strip only the consumed param; keep any other query params and the hash
+    const url = new URL(window.location.href);
+    url.searchParams.delete("s");
+    history.replaceState(null, "", url);
   } catch (error) {
     console.error("Failed to load shared state", error);
   }

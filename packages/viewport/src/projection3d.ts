@@ -113,6 +113,10 @@ const clamp3DInteractionPoint = (
   };
 };
 
+// Far-offscreen sentinel for points that have no on-screen position; finite
+// so distance-based hit tests against it are well-defined and never match.
+const OFFSCREEN_CANVAS_COORD = -1e9;
+
 export function projectWorldPosition3D(
   snapshot: ViewportRenderSnapshot,
   rect: ViewportRect,
@@ -122,7 +126,13 @@ export function projectWorldPosition3D(
   const { width, height } = getViewportSize(snapshot, rect);
   projectedPosition
     .set(position.x, position.y, position.z)
-    .project(projectionCamera);
+    .applyMatrix4(projectionCamera.matrixWorldInverse);
+  if (projectedPosition.z >= 0) {
+    // Behind the camera: projecting would mirror the point onto the screen,
+    // making it spuriously hoverable/draggable.
+    return { x: OFFSCREEN_CANVAS_COORD, y: OFFSCREEN_CANVAS_COORD };
+  }
+  projectedPosition.applyMatrix4(projectionCamera.projectionMatrix);
 
   return {
     x: ((projectedPosition.x + 1) / 2) * width,
@@ -143,10 +153,12 @@ export function toCanvasCoords3D(
       ? Float64Array.of(point.x, point.y)
       : Float64Array.of(point.x, point.y, z);
   const zValue = zValueForPoint ? zValueForPoint(entry) : (z ?? 0);
+  // Render layers flatten z by transitionZMultiplier during the 2D/3D
+  // transition; match them so screen positions agree with drawn geometry.
   return projectWorldPosition3D(snapshot, rect, {
     x: point.x,
     y: point.y,
-    z: (zValue * zScale) / 100,
+    z: ((zValue * zScale) / 100) * snapshot.transitionZMultiplier,
   });
 }
 

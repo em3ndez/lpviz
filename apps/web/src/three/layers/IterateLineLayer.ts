@@ -1,250 +1,112 @@
-import { computeIterateZ, type State } from "@/features/core/store";
+import { type IteratePath } from "@/features/core/store";
 import type { PointXY } from "@lpviz/math/types";
 import { Group } from "three";
-import { Line2 } from "three/examples/jsm/lines/Line2.js";
-import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
-import { PHASE_COLORS } from "../helpers/phaseColors";
+import { writeFlatXYZ } from "../helpers/flatPositions";
+import { PathRibbon } from "../helpers/pathRibbon";
+import { PHASE_COLORS_BYTES } from "../helpers/phaseColors";
 import { RENDER_ORDER } from "../helpers/renderOrder";
 import { shouldRenderSnapshotMode } from "../helpers/sceneVisibility";
-import {
-  applyHugeBounds,
-  getSharedLineMaterial,
-} from "../helpers/sharedLineMaterials";
-import type { Layer } from "../Layer";
 import type { SceneContext } from "../SceneContext";
+import { LayerBase } from "./base/LayerBase";
 
 const ITERATE_LINE_COLOR = "#800080";
-const ITERATE_LINE_RENDER_ORDER = RENDER_ORDER.iterateLine;
 const ITERATE_LINE_THICKNESS = 3;
 
-function getIterateRenderZ(
-  entry: Float64Array,
+let pointScratch = new Float32Array(0);
+let colorScratch = new Uint8Array(0);
+
+function buildPositions(
+  path: IteratePath,
   objectiveVector: PointXY | null,
-  zScale: number,
-  is3D: boolean,
-  transitionZMultiplier = 1,
-) {
-  if (!is3D) return 0;
-  return (
-    ((computeIterateZ(entry, objectiveVector) * zScale) / 100) *
-    transitionZMultiplier
-  );
+): Float32Array {
+  // raw z: zScale and the 2D/3D transition flattening are applied via
+  // object3D.scale.z, so neither rebuilds the path
+  if (pointScratch.length < path.count * 3) {
+    pointScratch = new Float32Array(path.count * 3);
+  }
+  writeFlatXYZ(pointScratch, path.points, path.count, path.stride, objectiveVector);
+  return pointScratch;
 }
 
-function buildLinePositions(
-  path: Float64Array[],
-  objectiveVector: PointXY | null,
-  zScale: number,
-  is3D: boolean,
-  transitionZMultiplier = 1,
-) {
-  if (path.length < 2) return new Float32Array();
-  const positions = new Float32Array(path.length * 3);
-  for (let i = 0; i < path.length; i++) {
-    const entry = path[i]!;
-    positions[i * 3] = entry[0]!;
-    positions[i * 3 + 1] = entry[1]!;
-    positions[i * 3 + 2] = getIterateRenderZ(
-      entry,
-      objectiveVector,
-      zScale,
-      is3D,
-      transitionZMultiplier,
-    );
+function buildPhaseColors(phases: number[]): Uint8Array {
+  if (colorScratch.length < phases.length * 4) {
+    colorScratch = new Uint8Array(phases.length * 4);
   }
-  return positions;
+  for (let i = 0; i < phases.length; i++) {
+    const rgb = PHASE_COLORS_BYTES[phases[i]! % PHASE_COLORS_BYTES.length]!;
+    const base = i * 4;
+    colorScratch[base] = rgb[0];
+    colorScratch[base + 1] = rgb[1];
+    colorScratch[base + 2] = rgb[2];
+    colorScratch[base + 3] = 255;
+  }
+  return colorScratch;
 }
 
-type SegmentEntry = { color: string; positions: Float32Array };
-
-function buildIterateSegments(
-  raw: State,
-  is3D: boolean,
-  transitionZMultiplier = 1,
-): SegmentEntry[] {
-  if (raw.iteratePath.length < 2) return [];
-
-  const hasPhases =
-    raw.iteratePhases.length === raw.iteratePath.length &&
-    raw.iteratePhases.length > 0;
-
-  if (!hasPhases) {
-    const positions = buildLinePositions(
-      raw.iteratePath,
-      raw.iterateObjectiveVector,
-      raw.zScale,
-      is3D,
-      transitionZMultiplier,
-    );
-    return positions.length > 0
-      ? [{ color: ITERATE_LINE_COLOR, positions }]
-      : [];
-  }
-
-  const segments: SegmentEntry[] = [];
-  let segStart = 0;
-  let segPhase = raw.iteratePhases[0]!;
-
-  for (let i = 1; i < raw.iteratePath.length; i++) {
-    const currentPhase = raw.iteratePhases[i]!;
-    if (currentPhase !== raw.iteratePhases[i - 1]!) {
-      const slice = raw.iteratePath.slice(segStart, i + 1);
-      const positions = buildLinePositions(
-        slice,
-        raw.iterateObjectiveVector,
-        raw.zScale,
-        is3D,
-        transitionZMultiplier,
-      );
-      if (positions.length > 0) {
-        segments.push({
-          color: PHASE_COLORS[segPhase % PHASE_COLORS.length]!,
-          positions,
-        });
-      }
-      segStart = i - 1;
-      segPhase = currentPhase;
-    }
-  }
-  const lastSlice = raw.iteratePath.slice(segStart);
-  const lastPositions = buildLinePositions(
-    lastSlice,
-    raw.iterateObjectiveVector,
-    raw.zScale,
-    is3D,
-    transitionZMultiplier,
-  );
-  if (lastPositions.length > 0) {
-    segments.push({
-      color: PHASE_COLORS[segPhase % PHASE_COLORS.length]!,
-      positions: lastPositions,
-    });
-  }
-
-  return segments;
-}
-
-function makeLine2(group: Group): Line2 {
-  const geo = new LineGeometry();
-  applyHugeBounds(geo);
-  const ln = new Line2(
-    geo,
-    getSharedLineMaterial({
-      color: ITERATE_LINE_COLOR,
-      linewidth: ITERATE_LINE_THICKNESS,
-      depthTest: false,
-      depthWrite: false,
-      opacity: 1,
-    }),
-  );
-  ln.renderOrder = ITERATE_LINE_RENDER_ORDER;
-  ln.frustumCulled = false;
-  ln.computeLineDistances = () => ln;
-  group.add(ln);
-  return ln;
-}
-
-type PrevState = {
-  iteratePath: State["iteratePath"];
-  iteratePhases: State["iteratePhases"];
-  iterateObjectiveVector: PointXY | null;
-  zScale: number;
-  is3DMode: boolean;
-  isTransitioning3D: boolean;
-  mode: string;
-  transitionZMultiplier: number;
-};
-
-export class IterateLineLayer implements Layer {
+// The iterate path renders as a screen-space ribbon (see pathRibbon.ts):
+// true fat-line styling without Line2's quad-per-segment cost, which made
+// every camera frame pay for up to maxit capped quads. Phase coloring rides
+// along as a per-point color texture, replacing the old one-Line2-per-phase-
+// segment pool (and its draw call per segment).
+export class IterateLineLayer extends LayerBase {
   readonly object3D: Group;
-  readonly renderPass = "trace" as const;
-  readonly invalidationKeys = ["iterate"] as const;
-  private pool: Line2[] = [];
-  private prev: PrevState | null = null;
+  override readonly renderPass = "trace" as const;
+  override readonly invalidationKeys = ["iterate"] as const;
+  private ribbon: PathRibbon | null = null;
 
   constructor() {
+    super();
     this.object3D = new Group();
   }
 
-  update(ctx: SceneContext): void {
+  protected override everyFrame(ctx: SceneContext): void {
+    this.applyZScale(ctx);
+  }
+
+  protected dependencies(ctx: SceneContext): readonly unknown[] {
     const raw = ctx.getState();
-    const snap = ctx.getSnapshot();
+    return [
+      raw.iteratePath,
+      raw.iteratePhases,
+      raw.iterateObjectiveVector,
+      ctx.getSnapshot().mode,
+    ];
+  }
 
-    const p = this.prev;
+  protected rebuild(ctx: SceneContext): void {
+    const raw = ctx.getState();
     if (
-      p &&
-      p.iteratePath === raw.iteratePath &&
-      p.iteratePhases === raw.iteratePhases &&
-      p.iterateObjectiveVector === raw.iterateObjectiveVector &&
-      p.zScale === raw.zScale &&
-      p.is3DMode === raw.is3DMode &&
-      p.isTransitioning3D === raw.isTransitioning3D &&
-      p.mode === snap.mode &&
-      p.transitionZMultiplier === snap.transitionZMultiplier
-    ) {
-      return;
-    }
-    this.prev = {
-      iteratePath: raw.iteratePath,
-      iteratePhases: raw.iteratePhases,
-      iterateObjectiveVector: raw.iterateObjectiveVector,
-      zScale: raw.zScale,
-      is3DMode: raw.is3DMode,
-      isTransitioning3D: raw.isTransitioning3D,
-      mode: snap.mode,
-      transitionZMultiplier: snap.transitionZMultiplier,
-    };
-
-    if (
-      raw.iteratePath.length < 2 ||
-      !shouldRenderSnapshotMode(snap.mode, raw)
+      raw.iteratePath.count < 2 ||
+      !shouldRenderSnapshotMode(ctx.getSnapshot().mode, raw)
     ) {
       this.object3D.visible = false;
-      for (const ln of this.pool) ln.visible = false;
       return;
     }
 
-    const is3D = snap.mode === "3d";
-    const segments = buildIterateSegments(
-      raw,
-      is3D,
-      snap.transitionZMultiplier,
-    );
-
-    if (segments.length === 0) {
-      this.object3D.visible = false;
-      for (const ln of this.pool) ln.visible = false;
-      return;
-    }
-
-    while (this.pool.length < segments.length) {
-      this.pool.push(makeLine2(this.object3D));
-    }
-
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i]!;
-      const ln = this.pool[i]!;
-      const geo = ln.geometry as LineGeometry;
-      geo.setPositions(seg.positions);
-      delete (geo as any)._maxInstanceCount;
-      ln.material = getSharedLineMaterial({
-        color: seg.color,
-        linewidth: ITERATE_LINE_THICKNESS,
-        depthTest: false,
-        depthWrite: false,
+    if (!this.ribbon) {
+      this.ribbon = new PathRibbon({
+        color: ITERATE_LINE_COLOR,
         opacity: 1,
+        linewidth: ITERATE_LINE_THICKNESS,
       });
-      ln.visible = true;
-    }
-    for (let i = segments.length; i < this.pool.length; i++) {
-      this.pool[i]!.visible = false;
+      this.ribbon.mesh.renderOrder = RENDER_ORDER.iterateLine;
+      this.object3D.add(this.ribbon.mesh);
     }
 
+    const hasPhases =
+      raw.iteratePhases.length === raw.iteratePath.count &&
+      raw.iteratePhases.length > 0;
+    this.ribbon.setPath(
+      buildPositions(raw.iteratePath, raw.iterateObjectiveVector),
+      raw.iteratePath.count,
+      hasPhases ? buildPhaseColors(raw.iteratePhases) : null,
+    );
+    this.ribbon.mesh.visible = true;
     this.object3D.visible = true;
   }
 
   dispose(): void {
-    for (const ln of this.pool) ln.geometry.dispose();
-    this.pool = [];
+    this.ribbon?.dispose();
+    this.ribbon = null;
   }
 }

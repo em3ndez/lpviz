@@ -5,7 +5,6 @@ import {
   setState,
   on,
   onMeta,
-  type ViewportDirtyFlags,
 } from "@/features/core/store";
 import type { BoundingBox } from "@lpviz/math/geometry";
 import type { PointXY } from "@lpviz/math/types";
@@ -21,36 +20,20 @@ import {
   toCanvasCoords3D,
   toLogicalCoords3D,
 } from "@lpviz/viewport/projection3d";
-import {
-  buildPerspectivePoseFromViewAngle,
-  buildTransitionCompleteState,
-  buildTransitionStartState,
-  buildViewport2DStateFromTransitionFrame,
-  buildViewportTransitionFrame,
-  buildViewportTransitionPlan,
-  TRANSITION_VIEWPORT_DIRTY_FLAGS,
-  type ViewportTransitionPlan,
-} from "@lpviz/viewport/transition";
+import { buildPerspectivePoseFromViewAngle } from "@lpviz/viewport/transition";
 import {
   buildResetViewport3DView,
   buildViewport3DSnapshot,
   fitViewport3DToBounds,
   getDefaultPerspectiveDistance3D,
   getMaxPerspectiveDistance3D,
-  getViewAngleFromSnapshot3D,
   isDefault3DView,
 } from "@lpviz/viewport/view3d";
 import {
-  getConstraintViewportDirtyFlags,
-  getDraftPreviewViewportDirtyFlags,
-  getIterateViewportDirtyFlags,
-  getObjectiveViewportDirtyFlags,
-  getPolytopeViewportDirtyFlags,
-  getTraceViewportDirtyFlags,
   getViewportUnboundedClipBounds,
-  getZScaleViewportDirtyFlags,
   isViewport3DState,
 } from "./dirtyFlags";
+import { getSnapshotViewportDirtyFlags } from "./snapshotDirty";
 import {
   getViewport2DControlsConfig,
   getViewport2DControlsSnapshot,
@@ -68,10 +51,7 @@ import {
   resetViewportRenderSnapshot,
   setViewportRenderSnapshot,
 } from "./runtime/snapshot";
-import {
-  resetViewportTransitionConfig,
-  setViewportTransitionConfig,
-} from "./runtime/transitionConfig";
+import { createTransitionController } from "./runtime/transitionController";
 import {
   DEFAULT_VIEWPORT_RENDER_SNAPSHOT,
   type ViewportBridge,
@@ -80,55 +60,6 @@ import {
 
 const VIEWPORT_NAVIGATION_IDLE_MS = 100;
 
-const ALL_VIEWPORT_DIRTY_FLAGS: ViewportDirtyFlags = {
-  grid: true,
-  polytope: true,
-  constraints: true,
-  objective: true,
-  trace: true,
-  iterate: true,
-};
-
-const getGridPanKey = (snapshot: ViewportRenderSnapshot) =>
-  snapshot.mode === "2d"
-    ? `${Math.round(snapshot.target.x)}:${Math.round(snapshot.target.y)}`
-    : "";
-
-function getSnapshotViewportDirtyFlags(
-  prev: ViewportRenderSnapshot,
-  next: ViewportRenderSnapshot,
-): ViewportDirtyFlags {
-  if (prev.mode !== next.mode) {
-    return ALL_VIEWPORT_DIRTY_FLAGS;
-  }
-
-  if (prev.transitionZMultiplier !== next.transitionZMultiplier) {
-    return TRANSITION_VIEWPORT_DIRTY_FLAGS;
-  }
-
-  const sizeChanged = prev.width !== next.width || prev.height !== next.height;
-  const zoomChanged =
-    prev.scaleFactor !== next.scaleFactor ||
-    prev.unitsPerPixel !== next.unitsPerPixel ||
-    prev.gridSpacing !== next.gridSpacing ||
-    prev.orthographic.left !== next.orthographic.left ||
-    prev.orthographic.right !== next.orthographic.right ||
-    prev.orthographic.top !== next.orthographic.top ||
-    prev.orthographic.bottom !== next.orthographic.bottom ||
-    prev.perspective.fov !== next.perspective.fov ||
-    prev.perspective.aspect !== next.perspective.aspect ||
-    prev.perspective.near !== next.perspective.near ||
-    prev.perspective.far !== next.perspective.far;
-  if (zoomChanged || sizeChanged) {
-    return { grid: true, objective: true };
-  }
-
-  if (getGridPanKey(prev) !== getGridPanKey(next)) {
-    return { grid: true };
-  }
-
-  return {};
-}
 
 type ViewportZBounds = {
   minZ: number;
@@ -157,13 +88,6 @@ export type ViewportApi = {
   start3DTransition: (targetMode: boolean) => void;
   getCanvasElement: () => HTMLCanvasElement;
   getCanvasRect: () => DOMRect;
-  getObjectiveDirtyFlags: () => ViewportDirtyFlags;
-  getPolytopeDirtyFlags: () => ViewportDirtyFlags;
-  getTraceDirtyFlags: () => ViewportDirtyFlags;
-  getIterateDirtyFlags: () => ViewportDirtyFlags;
-  getConstraintDirtyFlags: () => ViewportDirtyFlags;
-  getDraftPreviewDirtyFlags: () => ViewportDirtyFlags;
-  getZScaleDirtyFlags: () => ViewportDirtyFlags;
 };
 
 export type ViewportRuntime = ViewportApi & {
@@ -178,17 +102,31 @@ export async function createViewportRuntime({
   let currentSidebarWidth = 0;
   let navigationFrameCallback: (() => void) | null = null;
   let navigationIdleTimeoutId: number | null = null;
+  // Snapshot ownership model. At any instant exactly one source owns the render
+  // snapshot: the external 2D viewport controls, the external 3D orbit controls,
+  // or the transition animator (the transitionController, created below). The
+  // store's is3DMode/isTransitioning3D describe the DESIRED mode; the `*Active`
+  // flags below describe which source is currently WIRED UP. The two
+  // intentionally diverge for the length of a transition: while isTransitioning3D
+  // is true both shouldUseExternal2D/3D() return false, so neither controls
+  // source is active, and the controller's isActive() latches on instead so the
+  // animator owns the snapshot. Collapsing these into one "mode" enum would
+  // conflate desired vs. wired and lose that lag — see memory note
+  // viewport-ownership-consolidation.
+  //
+  // managerSnapshot is the snapshot the runtime itself owns (3D controls + the
+  // transition animator publish through it). It is an immutable VALUE: only the
+  // reference is ever reassigned (always to a freshly built snapshot); the
+  // object is never mutated, which is what makes publishSnapshot's prev/next
+  // diff meaningful.
   let managerSnapshot: ViewportRenderSnapshot = {
     ...DEFAULT_VIEWPORT_RENDER_SNAPSHOT,
   };
   let externalControlsBlocked = false;
   let external2DViewportActive = false;
   let external3DControlsActive = false;
+  // bumped to signal subscribers (3D controls bridge) to re-sync from config
   let external3DControlsSyncToken = 0;
-  let externalTransitionRunId = 0;
-  let externalTransitionSnapshotActive = false;
-  let externalTransitionProgress = 0;
-  let activeTransitionPlan: ViewportTransitionPlan | null = null;
   let cachedViewportRect = viewportBridge.getCanvasRect();
 
   const shouldUseExternal2DViewport = () => {
@@ -313,34 +251,6 @@ export async function createViewportRuntime({
     );
   };
 
-  const syncTransitionPlanarState = (
-    plan: ViewportTransitionPlan,
-    frame: ReturnType<typeof buildViewportTransitionFrame>,
-  ) => {
-    if (plan.direction !== "to2d") {
-      return undefined;
-    }
-
-    const planarState = buildViewport2DStateFromTransitionFrame(
-      plan,
-      frame,
-      getViewportRect(),
-      currentSidebarWidth,
-    );
-    setViewport2DControlsConfig(
-      {
-        sidebarWidth: currentSidebarWidth,
-        fallbackSnapshot: frame.snapshot,
-      },
-      { emit: false },
-    );
-    setViewport2DControlsState(planarState, {
-      notify: false,
-      emit: false,
-    });
-    return planarState;
-  };
-
   const applyExternalPerspectivePose = (
     pose: {
       position: { x: number; y: number; z: number };
@@ -430,6 +340,29 @@ export async function createViewportRuntime({
     });
   };
 
+  // the 2D<->3D animator: one of the three snapshot-ownership sources (see the
+  // ownership-model comment above). It co-owns managerSnapshot with the runtime,
+  // so that is threaded in as get/set.
+  const transition = createTransitionController({
+    getManagerSnapshot: () => managerSnapshot,
+    setManagerSnapshot: (snapshot) => {
+      managerSnapshot = snapshot;
+    },
+    getViewportRect,
+    getSidebarWidth: () => currentSidebarWidth,
+    shouldUseExternal2DViewport,
+    isExternal3DControlsActive: () => external3DControlsActive,
+    getExternal2DSnapshot,
+    publishSnapshot,
+    syncManagerPlanarState,
+    syncExternal2DControls,
+    syncExternal3DControls,
+    clearActiveNavigation: () => {
+      clearViewportNavigationTimeout();
+      setViewportNavigationActive(false);
+    },
+  });
+
   setViewport2DControlsConfig(
     {
       enabled: false,
@@ -511,7 +444,9 @@ export async function createViewportRuntime({
 
       external2DViewportActive = nextExternal2DViewportActive;
 
-      if (externalTransitionSnapshotActive) {
+      // the transition animator owns the snapshot until it completes; don't let
+      // a mode change mid-transition publish a competing controls snapshot
+      if (transition.isActive()) {
         return;
       }
 
@@ -543,6 +478,25 @@ export async function createViewportRuntime({
     viewportBridge.invalidate({ viewportDirty });
   }, viewportDirtyController.signal);
 
+  // Shared tail of the layout-change handlers (updateDimensions /
+  // setSidebarWidth): once the external-2D case is handled by the caller, a
+  // layout change must re-derive and republish whichever non-2D snapshot is
+  // live — a transition frame, an external-3D rebuild, or the static manager
+  // snapshot fallback.
+  const republishAfterLayoutChange = () => {
+    if (transition.isActive()) {
+      transition.republishCurrentFrame();
+      return;
+    }
+    if (external3DControlsActive) {
+      rebuildExternal3DSnapshot();
+      publish3DControlsConfig();
+      publishSnapshot(managerSnapshot);
+      return;
+    }
+    publishSnapshot(managerSnapshot);
+  };
+
   return {
     draw: () => {
       viewportBridge.invalidate({ layers: false });
@@ -561,24 +515,7 @@ export async function createViewportRuntime({
         publishSnapshot(managerSnapshot);
         return;
       }
-      if (externalTransitionSnapshotActive && activeTransitionPlan) {
-        const frame = buildViewportTransitionFrame(
-          activeTransitionPlan,
-          externalTransitionProgress,
-          getViewportRect(),
-        );
-        syncTransitionPlanarState(activeTransitionPlan, frame);
-        managerSnapshot = frame.snapshot;
-        publishSnapshot(frame.snapshot);
-        return;
-      }
-      if (external3DControlsActive) {
-        rebuildExternal3DSnapshot();
-        publish3DControlsConfig();
-        publishSnapshot(managerSnapshot);
-        return;
-      }
-      publishSnapshot(managerSnapshot);
+      republishAfterLayoutChange();
     },
     setSidebarWidth: (width) => {
       currentSidebarWidth = width;
@@ -589,24 +526,7 @@ export async function createViewportRuntime({
         publishSnapshot(getExternal2DSnapshot());
         return;
       }
-      if (externalTransitionSnapshotActive && activeTransitionPlan) {
-        const frame = buildViewportTransitionFrame(
-          activeTransitionPlan,
-          externalTransitionProgress,
-          getViewportRect(),
-        );
-        syncTransitionPlanarState(activeTransitionPlan, frame);
-        managerSnapshot = frame.snapshot;
-        publishSnapshot(frame.snapshot);
-        return;
-      }
-      if (external3DControlsActive) {
-        rebuildExternal3DSnapshot();
-        publish3DControlsConfig();
-        publishSnapshot(managerSnapshot);
-        return;
-      }
-      publishSnapshot(managerSnapshot);
+      republishAfterLayoutChange();
     },
     setNavigationFrameCallback: (callback) => {
       navigationFrameCallback = callback;
@@ -620,7 +540,11 @@ export async function createViewportRuntime({
       }
 
       if (!getState().isTransitioning3D) {
-        return isDefault3DView(managerSnapshot);
+        return isDefault3DView(
+          managerSnapshot,
+          currentSidebarWidth,
+          getViewportRect(),
+        );
       }
 
       return false;
@@ -795,133 +719,15 @@ export async function createViewportRuntime({
       );
     },
     getUnboundedClipBounds: () => getViewportUnboundedClipBounds(),
-    start3DTransition: (targetMode) => {
-      if (getState().isTransitioning3D) {
-        return;
-      }
-
-      // If the user was actively panning, the navigation-end timeout will fire
-      // during the transition when isExternalViewportNavigationOwned() is false
-      // (because isTransitioning3D=true) and silently bail out, leaving
-      // isNavigatingViewport stuck true. Clear it now before the transition
-      // disables the controls that set it.
-      clearViewportNavigationTimeout();
-      setViewportNavigationActive(false);
-
-      const transitionBaseSnapshot = shouldUseExternal2DViewport()
-        ? getExternal2DSnapshot()
-        : managerSnapshot;
-      const transitionViewAngle = external3DControlsActive
-        ? getViewAngleFromSnapshot3D(transitionBaseSnapshot)
-        : getState().viewAngle;
-      const transitionStartTime = performance.now();
-
-      if (shouldUseExternal2DViewport()) {
-        syncManagerPlanarState();
-        syncExternal2DControls(false);
-      }
-      if (external3DControlsActive) {
-        setState({ viewAngle: transitionViewAngle }, { viewportDirty: {} });
-        syncExternal3DControls(false);
-      }
-
-      const transitionPlan = buildViewportTransitionPlan({
-        snapshot: transitionBaseSnapshot,
-        targetMode,
-        viewAngle: transitionViewAngle,
-      });
-
-      externalTransitionSnapshotActive = true;
-
-      activeTransitionPlan = transitionPlan;
-      externalTransitionProgress = 0;
-      setState(
-        buildTransitionStartState(
-          targetMode,
-          transitionStartTime,
-          transitionPlan,
-        ),
-        { viewportDirty: TRANSITION_VIEWPORT_DIRTY_FLAGS },
-      );
-      const initialFrame = buildViewportTransitionFrame(
-        transitionPlan,
-        0,
-        getViewportRect(),
-      );
-      syncTransitionPlanarState(transitionPlan, initialFrame);
-      managerSnapshot = initialFrame.snapshot;
-      publishSnapshot(initialFrame.snapshot);
-
-      externalTransitionRunId += 1;
-      setViewportTransitionConfig({
-        active: true,
-        runId: externalTransitionRunId,
-        targetMode,
-        startTime: transitionStartTime,
-        duration: transitionPlan.duration,
-        onFrame: (_progress, easedProgress) => {
-          if (!activeTransitionPlan) {
-            return;
-          }
-          externalTransitionProgress = easedProgress;
-          const frame = buildViewportTransitionFrame(
-            activeTransitionPlan,
-            easedProgress,
-            getViewportRect(),
-          );
-          syncTransitionPlanarState(activeTransitionPlan, frame);
-          managerSnapshot = frame.snapshot;
-          publishSnapshot(frame.snapshot);
-        },
-        onComplete: () => {
-          const completedPlan = activeTransitionPlan;
-          if (completedPlan) {
-            externalTransitionProgress = 1;
-            const frame = buildViewportTransitionFrame(
-              completedPlan,
-              1,
-              getViewportRect(),
-            );
-            syncTransitionPlanarState(completedPlan, frame);
-            managerSnapshot = frame.snapshot;
-          }
-          // Synchronous mode switch: clear transition state before setState so
-          // the store subscription sees externalTransitionSnapshotActive=false
-          // and correctly activates 2D/3D controls without an extra RAF delay.
-          externalTransitionSnapshotActive = false;
-          activeTransitionPlan = null;
-          if (completedPlan) {
-            setState(buildTransitionCompleteState(completedPlan), {
-              viewportDirty: TRANSITION_VIEWPORT_DIRTY_FLAGS,
-            });
-          }
-          resetViewportTransitionConfig();
-          publishSnapshot(
-            shouldUseExternal2DViewport()
-              ? getExternal2DSnapshot()
-              : managerSnapshot,
-          );
-        },
-      });
-    },
+    start3DTransition: (targetMode) => transition.begin(targetMode),
     getCanvasElement: () => viewportBridge.getCanvasElement(),
     getCanvasRect: () => getViewportRect() as DOMRect,
-    getObjectiveDirtyFlags: () =>
-      getObjectiveViewportDirtyFlags(isViewport3DState(getState())),
-    getPolytopeDirtyFlags: () => getPolytopeViewportDirtyFlags(),
-    getTraceDirtyFlags: () => getTraceViewportDirtyFlags(),
-    getIterateDirtyFlags: () => getIterateViewportDirtyFlags(),
-    getConstraintDirtyFlags: () => getConstraintViewportDirtyFlags(),
-    getDraftPreviewDirtyFlags: () => getDraftPreviewViewportDirtyFlags(),
-    getZScaleDirtyFlags: () => getZScaleViewportDirtyFlags(),
     destroy: () => {
       clearViewportNavigationTimeout();
       setViewportNavigationActive(false);
-      externalTransitionSnapshotActive = false;
-      activeTransitionPlan = null;
+      transition.reset();
       resetViewport2DControlsConfig();
       resetViewport3DControlsConfig();
-      resetViewportTransitionConfig();
       externalOwnershipController.abort();
       viewportDirtyController.abort();
       resetViewportRenderSnapshot();

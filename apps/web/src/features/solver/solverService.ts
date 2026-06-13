@@ -1,16 +1,34 @@
 import {
   addTraceToBuffer,
+  flattenIteratesToPath,
   getState,
   updateIteratePaths,
   updateIteratePathsWithTrace,
+  type IteratePath,
 } from "@/features/core/store";
 import type { ResultTextBlock } from "@/features/solver/types";
-const fmtInt = (v: number, w: number) => String(v).padStart(w);
-const fmtStr = (v: string, w: number) => v.padStart(w);
-const fmtF = (v: number, w: number, d: number) =>
-  ((v >= 0 ? "+" : "") + v.toFixed(d)).padStart(w);
-const fmtE = (v: number, w: number, d: number, signed = true) =>
-  ((signed && v >= 0 ? "+" : "") + v.toExponential(d)).padStart(w);
+import type { SolverWorkerSuccessResponse } from "@/features/solver/solverWorker";
+import { fmtE, fmtF, fmtInt, fmtStr } from "@lpviz/solver-engine/fmt";
+
+// Dispatch an unpacked worker result to the matching apply*Result. Replaces the
+// per-solver applyResult that each SolverControl used to carry (each of which
+// re-narrowed the response by solver — redundant, since the response already
+// discriminates on `solver`).
+export function applySolverResult(
+  response: SolverWorkerSuccessResponse,
+  updateResult: (payload: ResultRenderPayload) => void,
+): void {
+  switch (response.solver) {
+    case "ipm":
+      return applyIPMResult(response.result, updateResult);
+    case "pdhg":
+      return applyPDHGResult(response.result, updateResult);
+    case "simplex":
+      return applySimplexResult(response.result, updateResult);
+    case "central":
+      return applyCentralPathResult(response.result, updateResult);
+  }
+}
 
 type VirtualResultRow =
   | string
@@ -34,10 +52,17 @@ type VirtualResultRow =
       epsilon: number;
     };
 
+// Rows materialize lazily through this view so that a 100k-iteration result
+// never pays for building row objects that are not scrolled into view.
+type ResultRowsView<T = VirtualResultRow> = {
+  length: number;
+  at(index: number): T | undefined;
+};
+
 export interface VirtualResultPayload {
   type: "virtual";
   header: string;
-  rows: VirtualResultRow[];
+  rows: ResultRowsView;
   footer?: string;
 }
 
@@ -47,12 +72,16 @@ interface BlocksResultPayload {
 }
 
 export type ResultRenderPayload = VirtualResultPayload | BlocksResultPayload;
-export interface IPMResult {
+
+// Generic over the iterates representation: the worker/solver side emits one
+// Float64Array per iterate (the default); after the worker packs and the client
+// unpacks, the iterates are one flat IteratePath (no per-iterate views).
+export interface IPMResult<I = Float64Array[]> {
   iterates: {
     solution: {
-      x: Float64Array[];
+      x: I;
       header: string;
-      rows: Extract<VirtualResultRow, { kind: "ipm" }>[];
+      rows: ResultRowsView<Extract<VirtualResultRow, { kind: "ipm" }>>;
       footer?: string;
       mu?: number[];
     };
@@ -64,13 +93,13 @@ export interface SimplexResult {
   phase1Iterations?: Float64Array[];
   logs: string[][];
   mode: "primal" | "dual";
-  status?: "optimal" | "unbounded" | "unavailable";
+  status?: "optimal" | "unbounded" | "infeasible" | "unavailable";
 }
 
-export interface PDHGResult {
-  iterations: Float64Array[];
+export interface PDHGResult<I = Float64Array[]> {
+  iterations: I;
   header: string;
-  rows: Extract<VirtualResultRow, { kind: "pdhg" }>[];
+  rows: ResultRowsView<Extract<VirtualResultRow, { kind: "pdhg" }>>;
   footer: string;
   eps?: number[];
   phases?: number[];
@@ -83,31 +112,24 @@ export interface CentralPathResult {
   tsolve: number;
 }
 
-export function applyIPMResult(
-  result: IPMResult,
+function applyIPMResult(
+  result: IPMResult<IteratePath>,
   updateResult: (payload: ResultRenderPayload) => void,
 ) {
   const sol = result.iterates.solution;
-  const { objectiveVector } = getState();
+  // worker-packed results arrive flat with the display z already baked in
   applyCanonicalIterateResult(
     {
       iterations: sol.x,
       header: sol.header,
       rows: sol.rows,
       footer: sol.footer,
-      zFrom: (xy, index) => {
-        const obj = objectiveVector
-          ? objectiveVector.x * xy[0] + objectiveVector.y * xy[1]
-          : 0;
-        const mu = sol.mu?.[index] ?? 0;
-        return obj + mu;
-      },
     },
     updateResult,
   );
 }
 
-export function applySimplexResult(
+function applySimplexResult(
   result: SimplexResult,
   updateResult: (payload: ResultRenderPayload) => void,
 ) {
@@ -123,7 +145,7 @@ export function applySimplexResult(
           ...Array.from({ length: result.iterations.length }, () => 1),
         ]
       : undefined;
-  updateIteratePathsWithTrace(iterations, phases);
+  updateIteratePathsWithTrace(flattenIteratesToPath(iterations), phases);
   updateResult({
     type: "blocks",
     blocks: generateSimplexBlocks(
@@ -136,12 +158,11 @@ export function applySimplexResult(
   });
 }
 
-export function applyPDHGResult(
-  result: PDHGResult,
+function applyPDHGResult(
+  result: PDHGResult<IteratePath>,
   updateResult: (payload: ResultRenderPayload) => void,
 ) {
-  const epsArray = result.eps;
-  const [cx, cy] = getObjectiveVector();
+  // worker-packed results arrive flat with the display z already baked in
   applyCanonicalIterateResult(
     {
       iterations: result.iterations,
@@ -150,26 +171,22 @@ export function applyPDHGResult(
       footer: result.footer,
       phases: result.phases,
       restartIndices: result.restartIndices,
-      zFrom: (xy, index) => {
-        const eps =
-          epsArray && epsArray[index] !== undefined ? epsArray[index]! : 0;
-        const pObj = cx * xy[0] + cy * xy[1];
-        return pObj + 500 * eps;
-      },
     },
     updateResult,
   );
 }
 
-export function applyCentralPathResult(
+function applyCentralPathResult(
   result: CentralPathResult,
   updateResult: (payload: ResultRenderPayload) => void,
 ) {
+  const path = flattenIteratesToPath(result.iterations);
   applyCanonicalIterateResult(
     {
-      iterations: result.iterations,
+      iterations: path,
       header: result.logs[0] ?? "",
-      rows: result.logs.slice(1, -1),
+      // central-path logs carry no footer line (the footer below is synthesized)
+      rows: result.logs.slice(1),
       footer: `Traced central path in ${Math.round(result.tsolve * 1000)}ms`,
       updateTrace: false,
     },
@@ -177,17 +194,16 @@ export function applyCentralPathResult(
   );
 
   const { traceEnabled } = getState();
-  if (traceEnabled && result.iterations.length > 0) {
-    addTraceToBuffer(result.iterations);
+  if (traceEnabled && path.count > 0) {
+    addTraceToBuffer(path);
   }
 }
 
 type CanonicalIterateResult = {
-  iterations: Float64Array[];
+  iterations: IteratePath;
   header: string;
-  rows: VirtualResultRow[];
+  rows: ResultRowsView;
   footer?: string;
-  zFrom?: (xy: Float64Array, index: number) => number;
   updateTrace?: boolean;
   phases?: number[];
   restartIndices?: number[];
@@ -208,23 +224,16 @@ function applyCanonicalIterateResult(
     header,
     rows,
     footer,
-    zFrom,
     updateTrace = true,
     phases,
     restartIndices,
   }: CanonicalIterateResult,
   updateResult: (payload: ResultRenderPayload) => void,
 ) {
-  const iteratesWithZ = zFrom
-    ? iterations.map((xy, index) =>
-        Float64Array.of(xy[0]!, xy[1]!, zFrom(xy, index)),
-      )
-    : iterations;
-
   if (updateTrace) {
-    updateIteratePathsWithTrace(iteratesWithZ, phases, restartIndices);
+    updateIteratePathsWithTrace(iterations, phases, restartIndices);
   } else {
-    updateIteratePaths(iteratesWithZ, phases, restartIndices);
+    updateIteratePaths(iterations, phases, restartIndices);
   }
 
   updateResult(buildIteratePayload({ header, rows, footer }));
@@ -257,17 +266,21 @@ function generateSimplexBlocks(
   const phase2Rows =
     phase2logs.length <= 1
       ? []
-      : status === "unbounded" || status === "unavailable"
+      : status === "unbounded" ||
+          status === "infeasible" ||
+          status === "unavailable"
         ? phase2logs.slice(1)
         : phase2logs.slice(1, -1);
   const phase2Footer =
     status === "unbounded"
       ? "Unbounded LP"
-      : status === "unavailable"
-        ? "Dual simplex unavailable"
-        : phase2logs.length > 1
-          ? phase2logs[phase2logs.length - 1]
-          : "";
+      : status === "infeasible"
+        ? "Infeasible LP"
+        : status === "unavailable"
+          ? "Dual simplex unavailable"
+          : phase2logs.length > 1
+            ? phase2logs[phase2logs.length - 1]
+            : "";
 
   const phase1Title = "Phase 1";
   const phase2Title = "Phase 2";
@@ -298,19 +311,13 @@ function generateSimplexBlocks(
   ];
 }
 
-function getObjectiveVector(): [number, number] {
-  const { objectiveVector } = getState();
-  if (!objectiveVector) throw new Error("Objective vector is not set");
-  return [objectiveVector.x, objectiveVector.y];
-}
-
 function buildIteratePayload({
   header,
   rows,
   footer,
 }: {
   header: string;
-  rows: VirtualResultRow[];
+  rows: ResultRowsView;
   footer?: string;
 }): VirtualResultPayload {
   return {

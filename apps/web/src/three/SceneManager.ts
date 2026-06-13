@@ -5,21 +5,13 @@ import {
 import { getState, type ViewportDirtyFlags } from "@/features/core/store";
 import { getViewportRenderSnapshot } from "@/features/viewport/runtime/snapshot";
 import { Camera, Scene, WebGLRenderer } from "three";
-import type { Layer, RenderPassName } from "./Layer";
+import type { ImpostorResult, ImpostorStrategy } from "./ImpostorStrategy";
+import { RENDER_PASSES, type Layer, type RenderPassName } from "./Layer";
 import { LayerHost } from "./LayerHost";
 import type { SceneContext } from "./SceneContext";
+import { TracePassImpostor } from "./TracePassImpostor";
 
 type Size = { width: number; height: number; dpr: number };
-
-const RENDER_PASSES = [
-  "background",
-  "transparent",
-  "foreground",
-  "vertices",
-  "traceLines",
-  "trace",
-  "overlay",
-] as const satisfies readonly RenderPassName[];
 
 type RenderScenes = Record<RenderPassName, Scene>;
 
@@ -36,6 +28,17 @@ export class SceneManager {
   readonly scene = this.scenes.foreground;
   readonly renderer: WebGLRenderer;
   readonly layerHost = new LayerHost();
+  private traceImpostor = new TracePassImpostor(
+    () => this.invalidate({ layers: false }),
+    () => [this.scenes.transparent, this.scenes.foreground],
+  );
+  // per-pass render substitutions; only the trace pass has one today
+  private impostors: Partial<Record<RenderPassName, ImpostorStrategy>> = {
+    traceLines: this.traceImpostor,
+  };
+  // reused across frames so the render loop allocates no Map per frame; holds
+  // each impostor's prepared result between the prepare pass and the draw pass
+  private readonly substitutions = new Map<RenderPassName, ImpostorResult>();
 
   private camera: Camera | null = null;
   private dirty = true;
@@ -91,9 +94,13 @@ export class SceneManager {
     });
     this.resizeObserver.observe(canvas);
 
+    const manager = this;
     this.ctx = {
       scene: this.scene,
-      size: this._size,
+      // live getter: setSize replaces the _size object on every resize
+      get size() {
+        return manager._size;
+      },
       getSnapshot: getViewportRenderSnapshot,
       getFullSnapshot: getViewportRenderSnapshot,
       getState,
@@ -184,8 +191,11 @@ export class SceneManager {
             ...options.viewportDirty,
           };
         }
+        // trace appends/evictions are detected by TraceCache itself via the
+        // chunk sequence numbers, so trace/iterate dirt needs no cache flush
       } else {
         this.layersDirty = "all";
+        this.traceImpostor.markContentDirty();
       }
     }
     if (!this.dirty) {
@@ -257,6 +267,7 @@ export class SceneManager {
     this.unsubscribeCurrentMouse = null;
 
     this.layerHost.dispose();
+    this.traceImpostor.dispose();
     for (const scene of Object.values(this.scenes)) {
       for (const child of [...scene.children]) {
         scene.remove(child);
@@ -269,7 +280,29 @@ export class SceneManager {
   private renderScenes(camera: Camera): void {
     this.renderer.clear();
     this.renderer.autoClear = false;
+    // Prepare all impostors first: their offscreen baking (cache rebuild, 3D
+    // depth pre-pass) must run before any canvas pass renders, or a mid-loop
+    // render-target switch drops the composited result.
+    const substitutions = this.substitutions;
+    substitutions.clear();
     for (const pass of RENDER_PASSES) {
+      const impostor = this.impostors[pass];
+      if (impostor) {
+        substitutions.set(
+          pass,
+          impostor.prepare(this.renderer, camera, this.scenes[pass]),
+        );
+      }
+    }
+    for (const pass of RENDER_PASSES) {
+      if (substitutions.has(pass)) {
+        const result = substitutions.get(pass);
+        if (result === "skip") continue;
+        if (result) {
+          this.renderer.render(result.scene, result.camera);
+          continue;
+        }
+      }
       const scene = this.scenes[pass];
       if (scene.children.length === 0 || scene.children.every(isHidden)) {
         continue;

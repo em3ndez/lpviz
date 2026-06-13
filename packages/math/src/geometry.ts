@@ -7,6 +7,24 @@ export interface BoundingBox {
   maxY: number;
 }
 
+export function expandDegenerateBounds(
+  bounds: BoundingBox,
+  minExtent = 1,
+): BoundingBox {
+  let { minX, maxX, minY, maxY } = bounds;
+  if (maxX - minX < minExtent) {
+    const centerX = (minX + maxX) / 2;
+    minX = centerX - minExtent / 2;
+    maxX = centerX + minExtent / 2;
+  }
+  if (maxY - minY < minExtent) {
+    const centerY = (minY + maxY) / 2;
+    minY = centerY - minExtent / 2;
+    maxY = centerY + minExtent / 2;
+  }
+  return { minX, maxX, minY, maxY };
+}
+
 export function isConvexChain(
   points: ReadonlyArray<PointXY>,
   tol = 1e-9,
@@ -19,7 +37,13 @@ export function isConvexChain(
     const p1 = points[i + 1];
     const p2 = points[i + 2];
     const cross = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
-    if (Math.abs(cross) <= tol) continue;
+    if (Math.abs(cross) <= tol) {
+      // a 180-degree reversal also has zero cross product; reject it
+      const dot =
+        (p1.x - p0.x) * (p2.x - p1.x) + (p1.y - p0.y) * (p2.y - p1.y);
+      if (dot < -tol) return false;
+      continue;
+    }
     if (prevCross === 0) {
       prevCross = cross;
       continue;
@@ -101,7 +125,7 @@ export class VRep {
     };
   }
 
-  isConvex(): boolean {
+  isConvex(tol = 1e-9): boolean {
     if (this.points.length < 3) return true;
     let prevCross = 0;
     for (let i = 0, n = this.points.length; i < n; i++) {
@@ -110,9 +134,14 @@ export class VRep {
       const p2 = this.points[(i + 2) % n];
       const cross =
         (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
-      if (cross !== 0) {
+      if (Math.abs(cross) > tol) {
         if (prevCross === 0) prevCross = cross;
         else if (Math.sign(cross) !== Math.sign(prevCross)) return false;
+      } else {
+        // a 180-degree reversal also has zero cross product; reject it
+        const dot =
+          (p1.x - p0.x) * (p2.x - p1.x) + (p1.y - p0.y) * (p2.y - p1.y);
+        if (dot < -tol) return false;
       }
     }
     return true;
@@ -314,6 +343,26 @@ export function findStrictFeasiblePoint(
   return null;
 }
 
+function hasNontrivialRecessionDirection(lines: Lines, tol = 1e-6): boolean {
+  // The recession cone {d : A·d <= 0} of a 2D region is nontrivial iff some
+  // direction perpendicular to a constraint normal satisfies every constraint
+  // (any extreme ray of the cone lies on the boundary of some half-plane).
+  for (const [A, B] of lines) {
+    const norm = Math.hypot(A, B);
+    if (norm <= tol) continue;
+    const candidates: Array<[number, number]> = [
+      [-B / norm, A / norm],
+      [B / norm, -A / norm],
+    ];
+    for (const [dx, dy] of candidates) {
+      if (lines.every(([A2, B2]) => A2 * dx + B2 * dy <= tol)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function classifyRegion(
   lines: Lines,
   vertices: Vertices,
@@ -324,7 +373,9 @@ export function classifyRegion(
   }
 
   if (vertices.length >= 3) {
-    return "bounded";
+    // 3+ vertices alone do not imply boundedness: the region can still
+    // recede along a direction in its recession cone.
+    return hasNontrivialRecessionDirection(lines) ? "unbounded" : "bounded";
   }
 
   const feasiblePoint = findFeasiblePoint(lines);
@@ -372,20 +423,14 @@ export function verticesFromLines(lines: Lines, tol = 1e-6): Vertices {
   });
 
   if (unique.length <= 2) {
-    return unique.map(([x, y]) => [
-      parseFloat(x.toFixed(2)),
-      parseFloat(y.toFixed(2)),
-    ]);
+    return unique.map(([x, y]) => [x, y]);
   }
 
   const center = centroid(unique);
   return unique
     .map(([x, y]) => ({
       angle: Math.atan2(y - center[1], x - center[0]),
-      point: [parseFloat(x.toFixed(2)), parseFloat(y.toFixed(2))] as [
-        number,
-        number,
-      ],
+      point: [x, y] as [number, number],
     }))
     .sort((a, b) => a.angle - b.angle)
     .map(({ point }) => point);
@@ -497,7 +542,17 @@ function terminalSegmentClosesAgainstNonAdjacentConstraint(
   const segEnd = points[terminalSegmentIndex + 1];
 
   for (let i = 0; i < lines.length; i++) {
-    if (Math.abs(i - terminalSegmentIndex) <= 1) continue;
+    // Skip the segment's own line and the lines of adjacent edges, which all
+    // pass through one of the segment's endpoints. (Index arithmetic is not
+    // reliable here: buildConstraintRep skips degenerate edges, so lines[i]
+    // does not necessarily correspond to edge i.)
+    const [A, B, C] = lines[i];
+    if (
+      Math.abs(A * segStart[0] + B * segStart[1] - C) <= tol ||
+      Math.abs(A * segEnd[0] + B * segEnd[1] - C) <= tol
+    ) {
+      continue;
+    }
     const intersection = intersectSegmentWithLine(
       segStart,
       segEnd,
@@ -521,12 +576,16 @@ export function hasOpenBoundaryClosure(
   if (intersectOpenBoundaryRays(rays, lines, tol)) return true;
   if (points.length < 4) return false;
 
+  // Test each ray against every segment except its own adjacent one
+  // (segment 0 for the start ray, segment points.length - 2 for the end
+  // ray); hits at the shared vertex of a neighboring segment are already
+  // rejected by the tRay >= -tol check since that vertex lies behind the ray.
   const [startRay, endRay] = rays;
-  for (let i = 1; i < points.length - 2; i++) {
+  for (let i = 1; i < points.length - 1; i++) {
     if (intersectRayWithSegment(startRay, points[i], points[i + 1], tol))
       return true;
   }
-  for (let i = 0; i < points.length - 3; i++) {
+  for (let i = 0; i < points.length - 2; i++) {
     if (intersectRayWithSegment(endRay, points[i], points[i + 1], tol))
       return true;
   }

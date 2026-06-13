@@ -65,6 +65,19 @@ export function attachCanvasInteractions({
   const DOUBLE_TAP_MS = 350;
   const DOUBLE_TAP_RADIUS_PX = 28;
 
+  // pen and touch share the same "has this gesture drifted far enough to be a
+  // drag rather than a tap" test, latched onto the gesture's start record
+  const markIfMovedBeyondTap = (
+    start: { clientX: number; clientY: number; moved: boolean },
+    clientX: number,
+    clientY: number,
+  ) => {
+    start.moved =
+      start.moved ||
+      Math.hypot(clientX - start.clientX, clientY - start.clientY) >
+        DOUBLE_TAP_RADIUS_PX;
+  };
+
   const bindEvent = (
     target: EventTarget,
     eventName: string,
@@ -142,7 +155,6 @@ export function attachCanvasInteractions({
         highlightIndex: null,
         ...(options.extraPatch ?? {}),
       },
-      { viewportDirty: canvasManager.getPolytopeDirtyFlags() },
     );
     canvasManager.draw();
     sendPolytope();
@@ -151,10 +163,9 @@ export function attachCanvasInteractions({
 
   const applyEditorTransition = (
     transition: ReturnType<typeof getEditorTransition>,
-    rejectMessage: string,
   ) => {
     if (transition.kind === "reject-nonconvex") {
-      alert(rejectMessage);
+      alert(transition.reason);
       return;
     }
 
@@ -171,7 +182,6 @@ export function attachCanvasInteractions({
       }
       setState(
         { objectiveVector: transition.objectiveVector },
-        { viewportDirty: canvasManager.getObjectiveDirtyFlags() },
       );
       sendPolytope();
       canvasManager.draw();
@@ -204,7 +214,6 @@ export function attachCanvasInteractions({
 
       setState(
         { vertices: updatedVertices.map(([x, y]) => ({ x, y })) },
-        { viewportDirty: canvasManager.getPolytopeDirtyFlags() },
       );
 
       setState(
@@ -236,7 +245,6 @@ export function attachCanvasInteractions({
             indices.has(i) ? { x: v.x + shiftX, y: v.y + shiftY } : v,
           ),
         },
-        { viewportDirty: canvasManager.getPolytopeDirtyFlags() },
       );
       setState(
         {
@@ -272,7 +280,6 @@ export function attachCanvasInteractions({
             i === pointIndex ? logicalCoords : v,
           ),
         },
-        { viewportDirty: canvasManager.getPolytopeDirtyFlags() },
       );
       sendPolytope();
       canvasManager.draw();
@@ -286,7 +293,6 @@ export function attachCanvasInteractions({
 
     setState(
       { objectiveVector: logicalCoords },
-      { viewportDirty: canvasManager.getObjectiveDirtyFlags() },
     );
     sendPolytope();
     canvasManager.draw();
@@ -305,7 +311,6 @@ export function attachCanvasInteractions({
     if (phase === "awaiting_objective" || phase === "objective_preview") {
       setState(
         { currentObjective: logicalCoords },
-        { viewportDirty: canvasManager.getObjectiveDirtyFlags() },
       );
       canvasManager.draw();
     }
@@ -476,9 +481,7 @@ export function attachCanvasInteractions({
     if (finishResult.kind === "noop") return;
 
     if (finishResult.kind === "reject-nonconvex") {
-      alert(
-        "This open region is nonconvex. Please adjust the vertices before pressing Enter.",
-      );
+      alert(finishResult.reason);
       return;
     }
 
@@ -512,7 +515,6 @@ export function attachCanvasInteractions({
     const clampedScale = Math.max(0.01, Math.min(100, effectiveScale));
     setState(
       { zScale: clampedScale },
-      { viewportDirty: canvasManager.getZScaleDirtyFlags() },
     );
     canvasManager.draw();
   };
@@ -544,10 +546,7 @@ export function attachCanvasInteractions({
       kind: "delete-vertex",
       deleteIndex,
     });
-    applyEditorTransition(
-      deletion,
-      "Deleting this vertex would make the region nonconvex.",
-    );
+    applyEditorTransition(deletion);
   };
 
   const handleDoubleClickAt = (clientX: number, clientY: number) => {
@@ -563,10 +562,7 @@ export function attachCanvasInteractions({
       point: logicalMouse,
     });
     if (hullRepair.kind !== "noop") {
-      applyEditorTransition(
-        hullRepair,
-        "Repairing this region would make it nonconvex.",
-      );
+      applyEditorTransition(hullRepair);
       return;
     }
 
@@ -582,10 +578,7 @@ export function attachCanvasInteractions({
         point: logicalMouse,
       });
       if (insertion.kind !== "noop") {
-        applyEditorTransition(
-          insertion,
-          "Inserting this point would make the region nonconvex.",
-        );
+        applyEditorTransition(insertion);
         return;
       }
     }
@@ -598,10 +591,7 @@ export function attachCanvasInteractions({
         point: { x: logicalMouse.x, y: logicalMouse.y },
       });
       if (insertion.kind !== "noop") {
-        applyEditorTransition(
-          insertion,
-          "Inserting this point would make the region nonconvex.",
-        );
+        applyEditorTransition(insertion);
       }
     }
   };
@@ -654,22 +644,37 @@ export function attachCanvasInteractions({
         event.clientX,
         event.clientY,
       );
-      applyEditorTransition(
-        getEditorTransition(state, { kind: "click", point }),
-        "Adding this vertex would make the polytope nonconvex. Please choose another point.",
-      );
+      applyEditorTransition(getEditorTransition(state, { kind: "click", point }));
     }
   };
 
+  const isTextEntryTarget = (target: EventTarget | null) =>
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.tagName === "SELECT");
+
   const handleKeyDown = (event: KeyboardEvent) => {
+    // this is a window-level capture handler; typing in form fields must not
+    // trigger canvas shortcuts (or block native text-editing undo)
+    if (isTextEntryTarget(event.target)) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
       event.preventDefault();
       handleUndoRedo(event.shiftKey);
     }
     if (event.key === "Enter") {
+      // let a focused button or link activate natively
+      if (
+        event.target instanceof HTMLElement &&
+        event.target.closest("button, a, [role='button']")
+      ) {
+        return;
+      }
       event.preventDefault();
       finishOpenRegion();
     }
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key.toLowerCase() === "s") {
       const { snapToGrid } = getState();
       setState({ snapToGrid: !snapToGrid });
@@ -678,7 +683,6 @@ export function attachCanvasInteractions({
       const { objectiveHidden } = getState();
       setState(
         { objectiveHidden: !objectiveHidden },
-        { viewportDirty: canvasManager.getObjectiveDirtyFlags() },
       );
       canvasManager.draw();
     }
@@ -729,6 +733,14 @@ export function attachCanvasInteractions({
         clientY: event.clientY,
         moved: false,
       };
+      // Without capture, lifting the pen outside the canvas delivers
+      // pointerup elsewhere (and preventDefault suppresses the compat
+      // mouseup fallback), leaving the editor stuck in "dragging".
+      try {
+        canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // pointer may already be gone
+      }
       handlePointerStart(event.clientX, event.clientY, event);
     },
     { capture: true },
@@ -744,12 +756,7 @@ export function attachCanvasInteractions({
       ) {
         return;
       }
-      activePenStart.moved =
-        activePenStart.moved ||
-        Math.hypot(
-          event.clientX - activePenStart.clientX,
-          event.clientY - activePenStart.clientY,
-        ) > DOUBLE_TAP_RADIUS_PX;
+      markIfMovedBeyondTap(activePenStart, event.clientX, event.clientY);
       handlePointerMove(event.clientX, event.clientY, event);
     },
     { capture: true },
@@ -782,6 +789,9 @@ export function attachCanvasInteractions({
     "pointercancel",
     (event: PointerEvent) => {
       if (activePenStart?.pointerId === event.pointerId) {
+        // end the drag like pointerup would, or the editor stays "dragging"
+        // with the viewport controls blocked
+        handlePointerRelease(event);
         activePenStart = null;
       }
     },
@@ -809,12 +819,7 @@ export function attachCanvasInteractions({
       if (event.touches.length !== 1) return;
       const touch = event.touches[0];
       if (activeTouchStart) {
-        activeTouchStart.moved =
-          activeTouchStart.moved ||
-          Math.hypot(
-            touch.clientX - activeTouchStart.clientX,
-            touch.clientY - activeTouchStart.clientY,
-          ) > DOUBLE_TAP_RADIUS_PX;
+        markIfMovedBeyondTap(activeTouchStart, touch.clientX, touch.clientY);
       }
       handlePointerMove(touch.clientX, touch.clientY, event);
     },
