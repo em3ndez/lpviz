@@ -1,37 +1,12 @@
 import type { AppContext } from "@/app/appContext";
-import { getState, on, type State } from "@/features/core/store";
+import {
+  computeDrawingPhase,
+  getState,
+  on,
+  type State,
+} from "@/features/core/store";
 import { el } from "@/ui/dom";
-
-function usageTips(): HTMLDivElement {
-  const tips = el("div", { id: "usageTips" });
-  tips.innerHTML = `
-    <br>
-    <br>
-    <strong class="usage-title">Usage Tips:</strong>
-    <br>
-    <br>
-    <strong>Draw a polygon</strong>: click to add vertices
-    <br>
-    <strong>Select a solver</strong>: select a solver to solve immediately
-    <br>
-    <strong>Change objective</strong>: drag it or click <strong>Rotate Objective</strong>
-    <br>
-    <strong>Add new vertices</strong>: double‐click an edge
-    <br>
-    <strong>Move vertices</strong>: drag vertices to reshape
-    <br>
-    <strong>Press S</strong>: toggle snapping to the grid
-    <br>
-    <strong>3D Mode</strong>: click 3D button, left-drag to pan, right-drag to orbit, scroll to zoom
-    <br>
-    <strong>3D Z Scale</strong>: Shift + scroll or use the Z Scale slider<br>
-    <strong>Reset</strong>: refresh the page<br>
-    <strong>Undo/Redo</strong>: ⌘+z to undo, ⇧⌘+z to redo<br>
-    <strong>Delete a vertex</strong>: right-click it <br>
-    <strong>Stop drawing</strong>: press enter
-  `;
-  return tips;
-}
+import { usageHint } from "@/ui/usageTips";
 
 export function mountSolverLogPanel(parent: HTMLElement, ctx: AppContext) {
   const frame = el("div", { id: "terminal-container" });
@@ -139,7 +114,7 @@ export function mountSolverLogPanel(parent: HTMLElement, ctx: AppContext) {
     result.replaceChildren();
     currentHoveredRow = null;
     if (s.resultDisplayMode === "usage") {
-      result.append(usageTips());
+      result.append(usageHint(computeDrawingPhase(s)));
       return;
     }
     if (s.resultDisplayMode === "blocks" && s.resultBlocks) {
@@ -278,6 +253,17 @@ export function mountSolverLogPanel(parent: HTMLElement, ctx: AppContext) {
       "resultMaxLineChars",
     ],
     () => render(getState()),
+    controller.signal,
+  );
+  // The placeholder hint reflects the current drawing phase, so refresh it as
+  // the user sketches — but only while the panel is showing that hint, never
+  // while a (potentially huge) solver result is mounted.
+  on(
+    ["vertices", "completionMode", "objectiveVector", "currentObjective"],
+    () => {
+      const s = getState();
+      if (s.resultDisplayMode === "usage") render(s);
+    },
     controller.signal,
   );
   return {

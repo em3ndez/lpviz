@@ -367,11 +367,12 @@ body {
   padding-top: 5px;
 }
 
-#usageTips {
-  font-size: 0.75rem;
+#usageHint {
+  font-size: 0.85rem;
+  line-height: 1.5;
   text-align: left;
-  color: #ccc;
-  padding-left: 5px;
+  color: #d8d8d8;
+  padding: 14px 10px;
 }
 
 #maximize,
@@ -666,6 +667,156 @@ body {
   outline: none;
 }
 
+/* ================================
+    Help Button (bottom right)
+    ================================ */
+#helpControl {
+  --help-size: 47px;
+  position: fixed;
+  right: 10px;
+  bottom: 10px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  /* The closed panel stays in layout (visibility: hidden), so the container
+     spans a tall invisible box over the canvas. Let pointer events fall
+     through it — only the button and the open panel opt back in — otherwise
+     it swallows drags in the bottom-right corner. */
+  pointer-events: none;
+}
+
+#helpButton {
+  width: var(--help-size);
+  height: var(--help-size);
+  box-sizing: border-box;
+  padding: 10px;
+  font-family: "JuliaMono", monospace;
+  font-size: 1.5rem;
+  font-weight: bold;
+  line-height: 1;
+  background-color: #fafafa;
+  color: #333;
+  border: 1px solid #333;
+  border-radius: 4px;
+  box-shadow: none;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background-color 0.2s ease;
+}
+
+#helpButton:hover {
+  background-color: #f0f0f0;
+}
+
+#helpButton:active,
+#helpControl.is-open #helpButton {
+  background-color: #e0e0e0;
+}
+
+#helpPanel {
+  width: min(460px, calc(100vw - 24px));
+  max-height: min(76vh, 640px);
+  margin-bottom: 12px;
+  padding: 16px 18px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  background-color: rgba(252, 252, 252, 0.98);
+  border: 1px solid #333;
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+  text-align: left;
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+  transform-origin: bottom right;
+  pointer-events: none;
+  visibility: hidden;
+  transition:
+    opacity 180ms ease,
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 180ms;
+}
+
+#helpControl.is-open #helpPanel {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+  visibility: visible;
+  transition:
+    opacity 180ms ease,
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s;
+}
+
+.help-panel__title {
+  font-family: "JuliaMono", monospace;
+  font-size: 1.05rem;
+  font-weight: bold;
+  color: #1a1a1a;
+  padding-bottom: 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #e6e6e6;
+}
+
+.usage-tips-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.usage-tips-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.usage-tips-section__title {
+  font-size: 0.64rem;
+  font-weight: bold;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: #9a9a9a;
+}
+
+.usage-tip {
+  display: grid;
+  grid-template-columns: minmax(0, auto) 1fr;
+  align-items: baseline;
+  gap: 4px 14px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.usage-tip__label {
+  font-weight: bold;
+  color: #2a2a2a;
+  white-space: nowrap;
+}
+
+.usage-tip__desc {
+  color: #6b6b6b;
+  text-align: right;
+}
+
+.usage-tip__desc strong {
+  color: #3a3a3a;
+  font-weight: bold;
+}
+
+.usage-tip__desc kbd {
+  display: inline-block;
+  font-family: "JuliaMono", monospace;
+  font-size: 0.72rem;
+  line-height: 1;
+  color: #333;
+  background: #f1f1f1;
+  border: 1px solid #d4d4d4;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 3px 5px;
+  margin: 0 1px;
+}
+
 @media (max-width: 700px) and (orientation: portrait) {
   body {
     font-size: 0.88rem;
@@ -745,8 +896,13 @@ body {
     padding: 6px 8px;
   }
 
-  #usageTips {
-    font-size: 0.64rem;
+  #usageHint {
+    font-size: 0.74rem;
+    padding: 10px 8px;
+  }
+
+  #helpControl {
+    display: none;
   }
 
   .controlPanel {

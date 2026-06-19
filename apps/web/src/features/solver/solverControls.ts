@@ -94,7 +94,7 @@ export function createSolverControls({
         if (hasUnboundedObjectiveDirection(s))
           return messageBlocks(
             "Solver unavailable",
-            "Central Path is disabled when the objective points in an unbounded direction.",
+            "Central Path is disabled when the objective points in an unbounded direction. Select IPM, PDHG, or Simplex to see how they handle this unbounded problem.",
           );
         return null;
       },

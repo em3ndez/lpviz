@@ -10,7 +10,7 @@ import { fmtE, fmtF, fmtInt } from "./fmt";
 
 const MAX_ITERATIONS = 100_000;
 
-type SimplexStatus = "optimal" | "unbounded" | "infeasible" | "unavailable";
+type SimplexStatus = "optimal" | "unbounded" | "infeasible";
 
 interface SimplexOptions {
   tol: number;
@@ -560,16 +560,20 @@ function solveDualMode(
   });
 
   if (Math.abs(phase1.objective) > tol) {
-    const unavailableMessage = "Dual simplex unavailable";
-    const phase2Logs = ["Phase 2 did not start.\n", unavailableMessage];
-    if (verbose) console.log(unavailableMessage);
+    // Phase 1 could not drive the artificial objective to zero, so the dual LP
+    // is infeasible. The feasible region we are visualizing is non-empty
+    // (emptiness is rejected before the solver runs), so by LP duality the
+    // primal LP is unbounded. Report it like the primal solver does and still
+    // plot the Phase 1 trajectory.
+    const phase2Logs = ["The dual LP is infeasible, so the primal LP is unbounded.\n"];
+    if (verbose) console.log("Dual LP infeasible: primal LP is unbounded.");
     return {
       iterations: [] as Float64Array[],
       phase1Iterations: phase1.basisHistory.map((basisIndices) =>
         Float64Array.from(dualPointFromBasis(basisIndices)),
       ),
       logs: [phase1.logs, phase2Logs],
-      status: "unavailable" as const,
+      status: "unbounded" as const,
     };
   }
 

@@ -3,6 +3,7 @@ import { getState, on } from "@/features/core/store";
 import { createViewportRuntime } from "@/features/viewport/runtime";
 import { attachCanvasInteractions } from "@/ui/canvas/canvasInteractions";
 import { mountCanvasGL } from "@/ui/canvas/mountCanvasGL";
+import { mountHelpButton } from "@/ui/canvas/mountHelpButton";
 import { mountProblemGallery } from "@/ui/canvas/mountProblemGallery";
 import { el } from "@/ui/dom";
 
@@ -91,6 +92,7 @@ export function mountCanvasStage(
   );
   zoom.append(reset, fit, toggle3d, share, zc);
   main.append(zoom);
+  const help = mountHelpButton(main);
   const handle = el("div", { id: "sidebarHandle" });
   handle.addEventListener("pointerdown", (e) => {
     if (!e.isPrimary || e.button !== 0) return;
@@ -122,6 +124,7 @@ export function mountCanvasStage(
       ctx.getCanvasManager()?.destroy();
       gl.destroy();
       gallery.destroy();
+      help.destroy();
       main.remove();
     },
   };
