@@ -1,4 +1,4 @@
-# `lpviz`
+# [`lpviz`](https://lpviz.net)
 
 [![arXiv](https://img.shields.io/badge/arXiv-2604.27518-b31b1b.svg?style=flat)](https://arxiv.org/abs/2604.27518)
 
