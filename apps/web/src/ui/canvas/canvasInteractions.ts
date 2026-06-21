@@ -64,6 +64,26 @@ export function attachCanvasInteractions({
   const cleanupHandlers: Array<() => void> = [];
   const DOUBLE_TAP_MS = 350;
   const DOUBLE_TAP_RADIUS_PX = 28;
+  // How close (in screen pixels) a click must land to the first vertex to close
+  // the region. Touch needs a more forgiving target than a mouse cursor.
+  const coarsePointer =
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(pointer: coarse)").matches;
+  const CLOSE_HIT_RADIUS_PX = coarsePointer ? 24 : 12;
+
+  // The editor's close test is in world units; convert the pixel radius to a
+  // world distance at `worldPoint` so it stays constant on screen across zoom
+  // levels (a fixed world threshold becomes an unhittable target when zoomed
+  // out, which is the usual case on mobile).
+  const worldDistanceForPixels = (worldPoint: PointXY, pixels: number) => {
+    const canvasPoint = canvasManager.toCanvasCoords(worldPoint.x, worldPoint.y);
+    const shifted = canvasManager.toLogicalCoords(
+      canvasPoint.x + pixels,
+      canvasPoint.y,
+    );
+    return Math.hypot(shifted.x - worldPoint.x, shifted.y - worldPoint.y);
+  };
 
   // pen and touch share the same "has this gesture drifted far enough to be a
   // drag rather than a tap" test, latched onto the gesture's start record
@@ -644,7 +664,13 @@ export function attachCanvasInteractions({
         event.clientX,
         event.clientY,
       );
-      applyEditorTransition(getEditorTransition(state, { kind: "click", point }));
+      applyEditorTransition(
+        getEditorTransition(state, {
+          kind: "click",
+          point,
+          closeThreshold: worldDistanceForPixels(point, CLOSE_HIT_RADIUS_PX),
+        }),
+      );
     }
   };
 

@@ -181,7 +181,7 @@ export function computeEditorRegionForState(state: State): EditorRegionResult {
 export function getEditorTransition(
   state: State,
   action:
-    | { kind: "click"; point: PointXY }
+    | { kind: "click"; point: PointXY; closeThreshold?: number }
     | { kind: "finish-open" }
     | { kind: "delete-vertex"; deleteIndex: number }
     | { kind: "insert-edge-point"; edgeIndex: number; point: PointXY }
@@ -205,7 +205,12 @@ export function getEditorTransition(
 
       if (state.vertices.length >= 3) {
         const polytope = VRep.fromPoints(state.vertices);
-        if (VRep.distance(action.point, state.vertices[0]) < 0.5) {
+        // closeThreshold is supplied by the canvas caller as the world-space
+        // equivalent of a fixed pixel hit radius, so closing on the first
+        // vertex stays equally easy at any zoom (it is otherwise a tiny target
+        // when zoomed out, e.g. on mobile). Defaults to a world distance.
+        const closeThreshold = action.closeThreshold ?? 0.5;
+        if (VRep.distance(action.point, state.vertices[0]) < closeThreshold) {
           return {
             kind: "edit",
             result: {
