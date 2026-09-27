@@ -180,31 +180,57 @@ export class VRep {
     return inside;
   }
 
-  isPointNearEdge(point: PointXY, edgeIndex: number, tolerance = 0.5): boolean {
-    if (this.points.length < 2) return false;
+  /**
+   * Distance from `point` to edge `edgeIndex`, or +Infinity when the point's
+   * projection falls outside the segment, the edge is degenerate, or the edge
+   * does not exist (the closing edge of a polyline, with `closed` false).
+   */
+  distanceToEdge(point: PointXY, edgeIndex: number, closed = true): number {
     const start = this.points[edgeIndex];
-    const end = this.points[(edgeIndex + 1) % this.points.length];
-    if (!start || !end) return false;
+    const end = closed
+      ? this.points[(edgeIndex + 1) % this.points.length]
+      : this.points[edgeIndex + 1];
+    if (!start || !end) return Number.POSITIVE_INFINITY;
 
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const len2 = dx * dx + dy * dy;
-    if (len2 === 0) return false;
+    if (len2 === 0) return Number.POSITIVE_INFINITY;
 
     const t = ((point.x - start.x) * dx + (point.y - start.y) * dy) / len2;
-    if (t < 0 || t > 1) return false;
+    if (t < 0 || t > 1) return Number.POSITIVE_INFINITY;
 
-    const proj = { x: start.x + t * dx, y: start.y + t * dy };
-    return VRep.distance(point, proj) < tolerance;
+    return VRep.distance(point, { x: start.x + t * dx, y: start.y + t * dy });
   }
 
-  findEdgeNearPoint(point: PointXY, tolerance = 0.5): number | null {
-    for (let i = 0; i < this.points.length; i++) {
-      if (this.isPointNearEdge(point, i, tolerance)) {
-        return i;
+  isPointNearEdge(point: PointXY, edgeIndex: number, tolerance = 0.5): boolean {
+    return this.distanceToEdge(point, edgeIndex) < tolerance;
+  }
+
+  /**
+   * The edge within `tolerance` of `point`, nearest first: a small polytope
+   * seen up close puts several edges inside the tolerance at once, and the
+   * first in index order is the wrong one as often as not. `closed` false
+   * treats the points as a polyline and never tests the last→first chord.
+   */
+  findEdgeNearPoint(
+    point: PointXY,
+    tolerance = 0.5,
+    closed = true,
+  ): number | null {
+    let nearestIndex: number | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    const edgeCount = closed
+      ? this.points.length
+      : Math.max(0, this.points.length - 1);
+    for (let i = 0; i < edgeCount; i++) {
+      const distance = this.distanceToEdge(point, i, closed);
+      if (distance < tolerance && distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = i;
       }
     }
-    return null;
+    return nearestIndex;
   }
 
   computeConvexHull(): PointXY[] {
