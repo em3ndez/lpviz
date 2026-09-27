@@ -18,6 +18,7 @@ import {
   getEditorTransition,
 } from "@/features/polytope-editor/editorSession";
 import {
+  EDGE_HIT_RADIUS_PX,
   exceedsDragThreshold,
   findBoundaryRayNearPoint,
   findEdgeNearPoint,
@@ -26,8 +27,10 @@ import {
   getLocalFromClient,
   getLogicalFromClient,
   solverStartNearLocalPoint,
+  worldDistanceForPixels,
   type ConstraintDragTarget,
 } from "@/features/polytope-editor/interactionState";
+import { stepReplayDurationMs } from "@/features/solver/replayDuration";
 import type { ViewportApi } from "@/features/viewport/runtime";
 import { verticesFromLines } from "@lpviz/math/geometry";
 import type { PointXY } from "@lpviz/math/types";
@@ -38,6 +41,7 @@ export function attachCanvasInteractions({
   sendPolytope,
   handleUndoRedo,
   onSolverStartMoved,
+  showReplayDuration,
 }: {
   canvasManager: ViewportApi;
   saveHistory: SaveHistory;
@@ -45,6 +49,7 @@ export function attachCanvasInteractions({
   handleUndoRedo: HandleUndoRedo;
   /** Re-solve the active solver after the start marker moved or reset. */
   onSolverStartMoved: () => void;
+  showReplayDuration: (durationMs: number) => void;
 }): () => void {
   let pendingDragHistory: HistoryEntry | null = null;
   let lastTap: {
@@ -75,19 +80,6 @@ export function attachCanvasInteractions({
     typeof window.matchMedia === "function" &&
     window.matchMedia("(pointer: coarse)").matches;
   const CLOSE_HIT_RADIUS_PX = coarsePointer ? 24 : 12;
-
-  // The editor's close test is in world units; convert the pixel radius to a
-  // world distance at `worldPoint` so it stays constant on screen across zoom
-  // levels (a fixed world threshold becomes an unhittable target when zoomed
-  // out, which is the usual case on mobile).
-  const worldDistanceForPixels = (worldPoint: PointXY, pixels: number) => {
-    const canvasPoint = canvasManager.toCanvasCoords(worldPoint.x, worldPoint.y);
-    const shifted = canvasManager.toLogicalCoords(
-      canvasPoint.x + pixels,
-      canvasPoint.y,
-    );
-    return Math.hypot(shifted.x - worldPoint.x, shifted.y - worldPoint.y);
-  };
 
   // pen and touch share the same "has this gesture drifted far enough to be a
   // drag rather than a tap" test, latched onto the gesture's start record
@@ -631,6 +623,7 @@ export function attachCanvasInteractions({
       logicalMouse,
       displayVertices,
       displayMode,
+      worldDistanceForPixels(canvasManager, logicalMouse, EDGE_HIT_RADIUS_PX),
     );
     if (edgeIndex !== null) {
       const insertion = getEditorTransition(state, {
@@ -709,7 +702,11 @@ export function attachCanvasInteractions({
         getEditorTransition(state, {
           kind: "click",
           point,
-          closeThreshold: worldDistanceForPixels(point, CLOSE_HIT_RADIUS_PX),
+          closeThreshold: worldDistanceForPixels(
+            canvasManager,
+            point,
+            CLOSE_HIT_RADIUS_PX,
+          ),
         }),
       );
     }
@@ -721,6 +718,21 @@ export function attachCanvasInteractions({
       target.tagName === "INPUT" ||
       target.tagName === "TEXTAREA" ||
       target.tagName === "SELECT");
+
+  // "+" lengthens the replay, "-" shortens it — the flashed readout names the
+  // value so the direction is unambiguous. It shows on every press, including
+  // one that hits an end of the range, so the keys never feel dead.
+  const adjustReplayDuration = (direction: 1 | -1) => {
+    const { solverSettings } = getState();
+    const replaySpeed = stepReplayDurationMs(
+      solverSettings.replaySpeed,
+      direction,
+    );
+    if (replaySpeed !== solverSettings.replaySpeed) {
+      setState({ solverSettings: { ...solverSettings, replaySpeed } });
+    }
+    showReplayDuration(replaySpeed);
+  };
 
   const handleKeyDown = (event: KeyboardEvent) => {
     // this is a window-level capture handler; typing in form fields must not
@@ -752,6 +764,17 @@ export function attachCanvasInteractions({
         { objectiveHidden: !objectiveHidden },
       );
       canvasManager.draw();
+    }
+    // "=" and "_" are the unshifted/shifted twins of "+" and "-", so both
+    // layouts of each key work. Checked after the modifier guard above so
+    // ctrl/cmd +/- stays browser zoom.
+    if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      adjustReplayDuration(1);
+    }
+    if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      adjustReplayDuration(-1);
     }
   };
 

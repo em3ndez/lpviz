@@ -25,35 +25,64 @@ export function expandDegenerateBounds(
   return { minX, maxX, minY, maxY };
 }
 
+const FULL_TURN = 2 * Math.PI;
+const TURNING_TOLERANCE = 1e-6;
+
+function isConvexSequence(
+  points: ReadonlyArray<PointXY>,
+  closed: boolean,
+  tol: number,
+): boolean {
+  const n = points.length;
+  if (n < 3) return true;
+  const turnCount = closed ? n : n - 2;
+
+  let orientation = 0;
+  let turning = 0;
+  for (let i = 0; i < turnCount; i++) {
+    const p0 = points[i];
+    const p1 = points[(i + 1) % n];
+    const p2 = points[(i + 2) % n];
+    const ax = p1.x - p0.x;
+    const ay = p1.y - p0.y;
+    const bx = p2.x - p1.x;
+    const by = p2.y - p1.y;
+    const cross = ax * by - ay * bx;
+    const dot = ax * bx + ay * by;
+    if (Math.abs(cross) <= tol) {
+      // straight continuation (or a repeated point) is fine; a reversal is not
+      if (dot < -tol) return false;
+      continue;
+    }
+    const sign = Math.sign(cross);
+    if (orientation === 0) orientation = sign;
+    else if (sign !== orientation) return false;
+    turning += Math.atan2(cross, dot);
+  }
+  // every turn degenerate: the points are collinear, and the region derivation
+  // reports the degenerate shape itself
+  if (orientation === 0) return true;
+
+  const revolutions = Math.abs(turning) / FULL_TURN;
+  return closed
+    ? Math.abs(revolutions - 1) <= TURNING_TOLERANCE
+    : revolutions <= 1 + TURNING_TOLERANCE;
+}
+
+/** A polyline that is part of the boundary of some convex polygon. */
 export function isConvexChain(
   points: ReadonlyArray<PointXY>,
   tol = 1e-9,
 ): boolean {
-  if (points.length < 3) return true;
+  return isConvexSequence(points, false, tol);
+}
 
-  let prevCross = 0;
-  for (let i = 0; i < points.length - 2; i++) {
-    const p0 = points[i];
-    const p1 = points[i + 1];
-    const p2 = points[i + 2];
-    const cross = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
-    if (Math.abs(cross) <= tol) {
-      // a 180-degree reversal also has zero cross product; reject it
-      const dot =
-        (p1.x - p0.x) * (p2.x - p1.x) + (p1.y - p0.y) * (p2.y - p1.y);
-      if (dot < -tol) return false;
-      continue;
-    }
-    if (prevCross === 0) {
-      prevCross = cross;
-      continue;
-    }
-    if (Math.sign(cross) !== Math.sign(prevCross)) {
-      return false;
-    }
-  }
-
-  return true;
+/** A closed polygon that is convex (and therefore simple). */
+export function isConvexPolygon(
+  points: ReadonlyArray<PointXY>,
+  tol = 1e-9,
+): boolean {
+  return isConvexSequence(points, true, tol);
 }
 
 export function centroid(vertices: Vertices) {
@@ -126,25 +155,7 @@ export class VRep {
   }
 
   isConvex(tol = 1e-9): boolean {
-    if (this.points.length < 3) return true;
-    let prevCross = 0;
-    for (let i = 0, n = this.points.length; i < n; i++) {
-      const p0 = this.points[i];
-      const p1 = this.points[(i + 1) % n];
-      const p2 = this.points[(i + 2) % n];
-      const cross =
-        (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
-      if (Math.abs(cross) > tol) {
-        if (prevCross === 0) prevCross = cross;
-        else if (Math.sign(cross) !== Math.sign(prevCross)) return false;
-      } else {
-        // a 180-degree reversal also has zero cross product; reject it
-        const dot =
-          (p1.x - p0.x) * (p2.x - p1.x) + (p1.y - p0.y) * (p2.y - p1.y);
-        if (dot < -tol) return false;
-      }
-    }
-    return true;
+    return isConvexPolygon(this.points, tol);
   }
 
   contains(point: PointXY): boolean {
@@ -169,31 +180,57 @@ export class VRep {
     return inside;
   }
 
-  isPointNearEdge(point: PointXY, edgeIndex: number, tolerance = 0.5): boolean {
-    if (this.points.length < 2) return false;
+  /**
+   * Distance from `point` to edge `edgeIndex`, or +Infinity when the point's
+   * projection falls outside the segment, the edge is degenerate, or the edge
+   * does not exist (the closing edge of a polyline, with `closed` false).
+   */
+  distanceToEdge(point: PointXY, edgeIndex: number, closed = true): number {
     const start = this.points[edgeIndex];
-    const end = this.points[(edgeIndex + 1) % this.points.length];
-    if (!start || !end) return false;
+    const end = closed
+      ? this.points[(edgeIndex + 1) % this.points.length]
+      : this.points[edgeIndex + 1];
+    if (!start || !end) return Number.POSITIVE_INFINITY;
 
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const len2 = dx * dx + dy * dy;
-    if (len2 === 0) return false;
+    if (len2 === 0) return Number.POSITIVE_INFINITY;
 
     const t = ((point.x - start.x) * dx + (point.y - start.y) * dy) / len2;
-    if (t < 0 || t > 1) return false;
+    if (t < 0 || t > 1) return Number.POSITIVE_INFINITY;
 
-    const proj = { x: start.x + t * dx, y: start.y + t * dy };
-    return VRep.distance(point, proj) < tolerance;
+    return VRep.distance(point, { x: start.x + t * dx, y: start.y + t * dy });
   }
 
-  findEdgeNearPoint(point: PointXY, tolerance = 0.5): number | null {
-    for (let i = 0; i < this.points.length; i++) {
-      if (this.isPointNearEdge(point, i, tolerance)) {
-        return i;
+  isPointNearEdge(point: PointXY, edgeIndex: number, tolerance = 0.5): boolean {
+    return this.distanceToEdge(point, edgeIndex) < tolerance;
+  }
+
+  /**
+   * The edge within `tolerance` of `point`, nearest first: a small polytope
+   * seen up close puts several edges inside the tolerance at once, and the
+   * first in index order is the wrong one as often as not. `closed` false
+   * treats the points as a polyline and never tests the last→first chord.
+   */
+  findEdgeNearPoint(
+    point: PointXY,
+    tolerance = 0.5,
+    closed = true,
+  ): number | null {
+    let nearestIndex: number | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    const edgeCount = closed
+      ? this.points.length
+      : Math.max(0, this.points.length - 1);
+    for (let i = 0; i < edgeCount; i++) {
+      const distance = this.distanceToEdge(point, i, closed);
+      if (distance < tolerance && distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = i;
       }
     }
-    return null;
+    return nearestIndex;
   }
 
   computeConvexHull(): PointXY[] {
